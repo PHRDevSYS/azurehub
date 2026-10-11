@@ -4,7 +4,7 @@
 // scraper/scrapling_worker.py; o Python só busca e extrai.
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { robotsAllows, PriceSourceError, USER_AGENT, timing, lastByHost } = require('../http');
+const { robotsAllows, assertPublicUrl, PriceSourceError, USER_AGENT, timing, lastByHost } = require('../http');
 const { parsePrice } = require('../match');
 
 const WORKER = path.join(__dirname, '..', '..', '..', 'scraper', 'scrapling_worker.py');
@@ -58,6 +58,8 @@ module.exports = {
   async search(src, q) {
     if (!/\{query\}/.test(src.search_url || '')) throw new PriceSourceError('a URL de busca precisa conter {query}');
     const url = src.search_url.replace('{query}', encodeURIComponent(q.text));
+    // O Python busca a página sozinho: o endereço é conferido aqui antes.
+    await assertPublicUrl(url);
     if (src.respect_robots !== false && !(await robotsAllows(url))) throw new PriceSourceError(`bloqueado pelo robots.txt de ${new URL(url).host}`);
     const host = new URL(url).host;
     const wait = (lastByHost.get(host) || 0) + Number(src.interval_ms || 3000) - timing.now();

@@ -591,6 +591,8 @@ const brNum = (v) => Number(v).toFixed(2).replace('.', ',');
 // "1.234,56", "1234,56" e "1234.56" → 1234.56
 const parseBr = (v) => { const t = String(v).trim().replace(/[R$\s]/g, ''); return Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t); };
 const pct = (v) => `${v > 0 ? '+' : ''}${Number(v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%`;
+// Tem preço de venda definido ("origem" = segue a origem, sem número gravado).
+const hasSale = (r) => r.price !== null || r.strategy === 'origem';
 const PZ_FILTERS = [['all', 'Todos'], ['none', 'Sem pesquisa'], ['defined', 'Com preço definido'], ['undefined', 'Sem preço definido'], ['above', 'Acima da mediana'], ['below', 'Na mediana ou abaixo']];
 
 async function viewPrecificacao() {
@@ -670,8 +672,8 @@ function pzVisible() {
     if (q && ![r.sku, r.title, r.brand].some((v) => String(v || '').toLowerCase().includes(q))) return false;
     switch (pz.filter) {
       case 'none': return !r.collectedAt;
-      case 'defined': return r.price !== null;
-      case 'undefined': return r.price === null;
+      case 'defined': return hasSale(r);
+      case 'undefined': return !hasSale(r);
       case 'above': return r.belowMarket === false;
       case 'below': return r.belowMarket === true;
       default: return true;
@@ -683,7 +685,7 @@ function pzVisible() {
 function pickBtn(r, key) {
   const v = r.values[key];
   if (v.price === null) return `<span class="muted" title="${esc(v.note || '')}">—</span>`;
-  const on = r.price !== null && r.strategy === key;
+  const on = hasSale(r) && r.strategy === key;
   return `<button class="pick ${on ? 'on' : ''}" data-apply="${key}" title="${esc(`Aplicar ${STRATEGY[key]} neste produto${v.note ? ` — ${v.note}` : ''}`)}">${money(v.price)}${v.clamped ? '<small> ⚑</small>' : ''}</button>`;
 }
 const pickCell = (r, key) => `<td class="num">${pickBtn(r, key)}</td>`;
@@ -695,7 +697,7 @@ function drawPricing() {
   const rows = pzVisible();
   const allOn = rows.length && rows.every((r) => pz.sel.has(r.sku));
   const researched = pz.rows.filter((r) => r.collectedAt).length;
-  const defined = pz.rows.filter((r) => r.price !== null).length;
+  const defined = pz.rows.filter(hasSale).length;
   const above = pz.rows.filter((r) => r.belowMarket === false).length;
   document.getElementById('pz-status').innerHTML = `<span><b>${pz.rows.length}</b> produtos</span>
     <span class="badge info">${researched} pesquisados</span><span class="badge ok">${defined} com preço definido</span>
@@ -718,8 +720,9 @@ function drawPricing() {
         <td class="num">${mk}${fail}</td>
         ${pickCell(r, 'minimo')}${pickCell(r, 'medio')}${pickCell(r, 'sugerido')}
         <td class="num"><input class="price-in" inputmode="decimal" value="${r.price === null ? '' : brNum(r.price)}" placeholder="${esc(brNum(r.origin))}" aria-label="Preço de venda de ${esc(r.sku)}">
-          <span class="sub">${r.price === null ? 'usa a origem' : `<span class="badge ${r.strategy === 'manual' ? 'warn' : 'info'}">${esc(STRATEGY[r.strategy] || r.strategy)}</span>`}</span></td>
-        <td class="num ${r.diffPct < 0 ? 'down' : r.diffPct > 0 ? 'up' : ''}">${r.price === null ? '—' : pct(r.diffPct)}${mkt}</td>
+          <span class="sub">${!hasSale(r) ? 'usa a origem' : `<span class="badge ${r.strategy === 'manual' ? 'warn' : 'info'}" title="${r.strategy === 'origem' ? 'Acompanha o preço da origem' : ''}">${esc(STRATEGY[r.strategy] || r.strategy)}</span>`}</span>
+          ${r.adjusted ? `<span class="sub lvl-warn" title="A origem ou o custo mudaram depois de aplicar: o envio respeita o piso e o teto atuais">enviado ${money(r.effective)}</span>` : ''}</td>
+        <td class="num ${r.diffPct < 0 ? 'down' : r.diffPct > 0 ? 'up' : ''}">${hasSale(r) ? pct(r.diffPct) : '—'}${mkt}</td>
         <td class="nowrap">${when(r.collectedAt)}${r.watch ? `<span class="sub">${r.watch} URL monitorada${r.watch > 1 ? 's' : ''}</span>` : ''}</td></tr>`;
     }).join('') || `<tr><td colspan="10" class="empty">${pz.rows.length ? 'Nenhum produto neste filtro.' : 'Nenhum produto capturado. Configure a origem em Integração.'}</td></tr>`}`;
   document.getElementById('pz-allchk').onchange = (e) => {
@@ -797,7 +800,7 @@ async function startResearch(skus) {
   try {
     if (!skus.length) throw new Error('Nenhum produto para pesquisar');
     const st = await api('/api/pricing/research', { method: 'POST', body: { skus } });
-    toast(st.total === skus.length ? `Pesquisando ${skus.length} produto(s)…` : 'Já existe uma pesquisa em andamento');
+    toast(st.started ? `Pesquisando ${skus.length} produto(s)…` : `Já existe uma pesquisa em andamento (${st.done}/${st.total})`);
     drawResearchStatus(st);
     pollResearch();
   } catch (e) { toast(e.message, true); }
@@ -851,16 +854,17 @@ async function openPricingDetail(sku) {
     <div class="status-line"><span>SKU <b>${esc(d.sku)}</b></span>
       <span>Origem (teto) <b>${money(d.origin)}</b></span><span>Piso <b>${money(d.floor)}</b></span>
       ${d.cost ? `<span>Custo ${money(d.cost)}</span>` : '<span class="muted">custo não informado na origem</span>'}
-      <span>Preço de venda <b>${d.price === null ? `${money(d.origin)} (origem)` : money(d.price)}</b>${d.strategy ? ` <span class="badge info">${esc(STRATEGY[d.strategy] || d.strategy)}</span>` : ''}</span></div>
+      <span>Preço de venda <b>${money(d.effective)}</b>${hasSale(d) ? ` <span class="badge info">${esc(STRATEGY[d.strategy] || d.strategy)}</span>` : ' <span class="muted">(origem)</span>'}
+        ${d.adjusted ? `<span class="lvl-warn">aplicado ${money(d.price)}, ajustado ao piso/teto atual</span>` : ''}</span></div>
 
     <h4>Referências</h4>
     <div class="table-wrap"><table><tr><th>Valor</th><th class="num">Preço</th><th>Como foi calculado</th><th></th></tr>
       ${['origem', 'minimo', 'medio', 'sugerido'].map((k) => {
         const v = d.values[k];
-        const how = { origem: 'Preço praticado na origem (promoção, se houver; com variações, a mais barata).', minimo: 'Menor preço válido encontrado no mercado.', medio: 'Ponto intermediário entre o mínimo do mercado e a origem.', sugerido: '' }[k];
+        const how = { origem: 'Preço praticado na origem (promoção, se houver; com variações, a mais barata). Aplicado, acompanha a origem.', minimo: 'Menor preço válido encontrado no mercado.', medio: 'Ponto intermediário entre o mínimo do mercado e a origem.', sugerido: '' }[k];
         return `<tr><td><b>${esc(STRATEGY[k][0].toUpperCase() + STRATEGY[k].slice(1))}</b></td><td class="num">${money(v.price)}</td>
           <td class="muted">${esc([how, v.note].filter(Boolean).join(' '))}</td>
-          <td class="num">${v.price === null ? '' : `<button data-dapply="${k}" class="${d.price !== null && d.strategy === k ? 'primary' : ''}">Aplicar</button>`}</td></tr>`;
+          <td class="num">${v.price === null ? '' : `<button data-dapply="${k}" class="${hasSale(d) && d.strategy === k ? 'primary' : ''}">Aplicar</button>`}</td></tr>`;
       }).join('')}
       <tr><td><b>Manual</b></td><td class="num"><input id="pd-manual" class="price-in" inputmode="decimal" value="${d.strategy === 'manual' ? brNum(d.price) : ''}" placeholder="0,00"></td>
         <td class="muted">Valor livre. Fora do piso ou acima da origem, o AzureHub avisa mas respeita.</td><td class="num"><button id="pd-save">Salvar</button></td></tr>

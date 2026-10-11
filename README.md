@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.3.0-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.3.1-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -79,7 +79,7 @@ Ative em **Integração › Módulos › Precificação**. A tela aparece entre
 
 | Valor | Como é calculado |
 |---|---|
-| **Origem** | Preço praticado na origem (o promocional, se houver; com variações, a mais barata). É o **teto**: nenhuma referência passa dele. |
+| **Origem** | Preço praticado na origem (o promocional, se houver; com variações, a mais barata). É o **teto**: nenhuma referência passa dele. Aplicar *Origem* faz o produto **acompanhar a origem** (se ela mudar, o envio muda junto). |
 | **Mínimo** | Menor preço válido encontrado no mercado (o valor "raspado"). |
 | **Médio** | Ponto intermediário entre o mínimo do mercado e a origem. |
 | **Sugerido** | Mediana do mercado menos um desconto (padrão 3%), arredondada **para baixo** (final ,90, ,99 ou centavos). Se o mercado estiver acima da origem, fica a origem. |
@@ -92,7 +92,11 @@ manual (avisa se estiver abaixo do piso ou acima da origem). **Limpar preço**
 volta a usar a origem.
 
 **Como o preço chega aos marketplaces:** o preço de venda substitui o preço da
-origem no envio (variações recebem o mesmo ajuste, proporcional). Com
+origem no envio (variações recebem o mesmo ajuste, proporcional). Um valor
+aplicado (mínimo, médio ou sugerido) é conferido **de novo no envio** contra o
+piso e o teto atuais: se a origem cair abaixo dele, ou o custo subir e levantar
+o piso, o envio se ajusta sozinho e a grade mostra "enviado R$ …". O preço
+**manual** vai como foi digitado. Com
 *Enviar origem como preço "de"*, a origem vai como preço cheio e o preço de
 venda como promoção. Mudar o preço de um produto já publicado o deixa
 **desatualizado** e coloca o reenvio na fila; desligar o módulo devolve todos
@@ -117,8 +121,10 @@ produto tem) e, sem resultado, pelo título + marca. Cada oferta recebe uma
 nota de similaridade (palavras em comum, marca, e números do título — `1L` ≠
 `500ml`); abaixo do mínimo configurado (padrão 45%) é descartada, assim como
 produtos **usados** (pela condição ou pelo título: "usado", "seminovo",
-"vitrine"…) e preços **fora da curva** (abaixo de 40% ou acima de 250% da
-mediana: acessórios, kits, erros). O detalhe mostra todas as ofertas, com o
+"vitrine"…), ofertas em **outra moeda** e preços **fora da curva** (abaixo de
+40% ou acima de 250% da mediana: acessórios, kits, erros). O mesmo anúncio
+encontrado duas vezes (ex.: URL monitorada que também veio na busca) conta uma
+vez só. O detalhe mostra todas as ofertas, com o
 motivo de cada descarte, e a situação de cada fonte.
 
 ### Coleta responsável
@@ -136,6 +142,16 @@ motivo de cada descarte, e a situação de cada fonte.
   cujos termos de uso permitam a consulta.
 - O preço da busca pode não incluir frete, desconto no Pix ou cupom: trate o
   mercado como referência, não como verdade.
+
+**Proteções de rede.** As URLs das fontes e as monitoradas são buscadas pelo
+servidor, então o hub recusa endereços internos — loopback, redes privadas,
+link-local (inclusive o serviço de metadados da nuvem, `169.254.169.254`),
+`localhost`/`.local` — conferindo o DNS antes de cada requisição e **a cada
+redirecionamento** (até 5). Só `http(s)`, sem usuário/senha na URL, resposta de
+no máximo 5 MB e cache em memória com no máximo 1000 entradas. Para pesquisar
+uma loja na sua rede local (teste), defina `PRICE_ALLOW_PRIVATE=1`.
+Limitação: o trabalhador Python do Scrapling segue redirecionamentos por conta
+própria — o AzureHub confere só a URL inicial.
 
 ### Scrapling (opcional)
 
@@ -243,6 +259,7 @@ Atrás do nginx, publique com `proxy_pass http://127.0.0.1:3900;`.
 | `MAX_MEDIA_MB` | `100` | Tamanho máximo de foto/vídeo baixado |
 | `SESSION_HOURS` | `12` | Duração da sessão do painel |
 | `PRICE_SCRAPER_CMD` | `python3` | Python usado pela fonte Scrapling da Precificação (ex.: `/opt/azurehub-scraper/bin/python`) |
+| `PRICE_ALLOW_PRIVATE` | vazio | `1` libera a pesquisa de preços em endereços da rede interna (só para testes) |
 
 ## Destinos (marketplaces)
 
@@ -458,7 +475,7 @@ public/                  painel: Integração, Produtos, Precificação, Prévia
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` — 82 casos: conectores de origem (Bling, WooCommerce,
+Testes: `npm test` — 90 casos: conectores de origem (Bling, WooCommerce,
 Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
 prévia → envio → sincronização → pausa), publicação e prévia nas três
 plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
@@ -467,8 +484,9 @@ padronizado/livre, marca desconhecida, GTIN "00") e **utensílio doméstico**
 (atributos com unidade/data, pré-venda, NCM, canal por peso) —, backoff e
 falha parcial; e a Precificação: similaridade, `robots.txt`, cada fonte de
 pesquisa com respostas simuladas (inclusive o trabalhador Scrapling), regras
-de piso/teto/arredondamento, aplicação em massa, preço efetivo no envio e
-reenvio automático dos produtos já publicados.
+de piso/teto/arredondamento, aplicação em massa, preço efetivo no envio
+(acompanhando origem e custo) e reenvio automático dos produtos já publicados,
+bloqueio de rede interna e de redirecionamentos, limites de tamanho e cache.
 
 ## Antes de ir para produção
 

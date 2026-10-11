@@ -184,6 +184,7 @@ td.prod { min-width: 220px; }
 
 /* ---------- precificação ---------- */
 td .sub.sale { color: var(--ok); font-weight: 600; }
+td .sub.lvl-warn { color: var(--warn); } td .sub.lvl-error { color: var(--err); }
 .legend { margin-top: 0; line-height: 1.6; }
 .pick { padding: 4px 9px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pick small { color: var(--warn); }

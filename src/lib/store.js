@@ -104,21 +104,14 @@ function migrate() {
   if (!cols('products').includes('sync_hash')) db.exec('ALTER TABLE products ADD COLUMN sync_hash TEXT');
 }
 
-// Hash do que vai para os marketplaces: conteúdo do produto + preço definido
-// na Precificação (quando o módulo está ativo). Mudar o preço também deixa o
-// anúncio "desatualizado" e dispara o reenvio dos já integrados.
-function pricingKey(sku) {
-  const cfg = getSetting('pricing', {}) || {};
-  if (!cfg.enabled) return '';
-  const row = get('SELECT price FROM pricing WHERE sku = ?', sku);
-  if (!row || row.price === null) return '';
-  return JSON.stringify([row.price, !!cfg.showOriginAsList]);
-}
-
+// Hash do que vai para os marketplaces: conteúdo do produto + preço de venda
+// efetivo da Precificação (quando o módulo está ativo). Mudar o preço também
+// deixa o anúncio "desatualizado" e dispara o reenvio dos já integrados.
+// (require tardio: o módulo de Precificação depende deste arquivo.)
 function refreshSyncHash(sku) {
-  const row = get('SELECT hash FROM products WHERE sku = ?', sku);
+  const row = get('SELECT hash, data FROM products WHERE sku = ?', sku);
   if (!row) return null;
-  const key = pricingKey(sku);
+  const key = require('../pricing').saleKey(sku, JSON.parse(row.data));
   const syncHash = key ? sha256(`${row.hash}|${key}`) : row.hash;
   run('UPDATE products SET sync_hash = ? WHERE sku = ?', syncHash, sku);
   return syncHash;

@@ -55,6 +55,24 @@ function floorOf(p, origin, cfg) {
   return r2(Math.max(byDiscount, byCost));
 }
 
+// Preço de venda que vale AGORA. Estratégias acompanham a origem e o custo
+// atuais: nunca acima da origem (teto) nem abaixo do piso — se a origem cair
+// ou o custo subir depois de aplicar, o envio se ajusta sozinho. "origem"
+// segue a origem; o manual é respeitado como foi digitado.
+function salePrice(p, row, cfg = getSettings()) {
+  if (!cfg.enabled || !row || row.strategy === 'origem') return null;
+  if (row.price === null || row.price === undefined) return null;
+  if (row.strategy === 'manual') return row.price;
+  const origin = originPrice(p);
+  return r2(Math.min(origin, Math.max(floorOf(p, origin, cfg), row.price)));
+}
+
+// Entra no hash de sincronização: mudou o preço efetivo → anúncio desatualizado.
+function saleKey(sku, data, cfg = getSettings()) {
+  const sp = salePrice(data, store.getPricing(sku), cfg);
+  return sp === null ? '' : JSON.stringify([sp, !!cfg.showOriginAsList]);
+}
+
 // Calcula as referências e a sugestão de um produto.
 function evaluate(p, research, pricing, cfg = getSettings()) {
   const origin = originPrice(p);
@@ -85,10 +103,13 @@ function evaluate(p, research, pricing, cfg = getSettings()) {
     values.sugerido = { price: s, note };
   }
   const defined = pricing && pricing.price !== null && pricing.price !== undefined ? pricing.price : null;
-  const effective = cfg.enabled && defined ? defined : origin;
+  const sale = salePrice(p, pricing, cfg);
+  const effective = sale === null ? origin : sale;
   return {
     origin, floor, cost: p.cost || null, market, values,
     price: defined, strategy: pricing ? pricing.strategy : null, effective,
+    // Preço aplicado antes e ajustado agora ao piso/teto (origem ou custo mudaram).
+    adjusted: sale !== null && defined !== null && sale !== defined,
     diffPct: origin ? r2(((effective - origin) / origin) * 100) : 0,
     belowMarket: market ? effective <= market.median : null,
   };
@@ -98,11 +119,12 @@ function evaluate(p, research, pricing, cfg = getSettings()) {
 function effectiveProduct(p, cfg = getSettings()) {
   if (!cfg.enabled) return p;
   const row = store.getPricing(p.sku);
-  if (!row || row.price === null || row.price === undefined) return p;
+  const target = salePrice(p, row, cfg);
+  if (target === null) return p;
   const base = originPrice(p);
-  const target = row.price;
   const factor = base ? target / base : 1;
-  const out = { ...p, pricing: { origin: base, final: target, strategy: row.strategy } };
+  // A janela de promoção da origem não vale para o preço definido aqui.
+  const out = { ...p, promoStart: null, promoEnd: null, pricing: { origin: base, final: target, strategy: row.strategy } };
   if (cfg.showOriginAsList) {
     // Preço "de" = origem; "por" = definido (vira promoção nos marketplaces).
     out.price = p.price;
@@ -156,8 +178,9 @@ function saveSettings(input) {
   };
   store.setSetting('pricing', next);
   let queued = 0;
-  if (next.enabled !== cur.enabled || next.showOriginAsList !== cur.showOriginAsList) {
-    // O preço efetivo de todos os produtos com preço definido mudou.
+  if (['enabled', 'showOriginAsList', 'maxDiscountPct', 'minMarginPct'].some((k) => next[k] !== cur[k])) {
+    // O preço efetivo dos produtos com preço definido pode ter mudado (módulo,
+    // modo de envio, ou piso que agora limita um preço aplicado antes).
     store.refreshAllSyncHashes();
     const skus = store.open().prepare('SELECT sku FROM pricing WHERE price IS NOT NULL').all().map((r) => r.sku);
     queued = resyncIntegrated(skus);
@@ -202,7 +225,8 @@ function applyStrategy(skus, strategy) {
     const ev = evaluate(prod.data, research[sku], pricing[sku], cfg);
     const v = ev.values[strategy];
     if (v.price === null) { skipped.push({ sku, reason: v.note }); continue; }
-    store.setPricing(sku, { price: v.price, strategy });
+    // "origem" não grava número: acompanha a origem quando ela mudar.
+    store.setPricing(sku, { price: strategy === 'origem' ? null : v.price, strategy });
     done.push(sku);
   }
   return { applied: done.length, skipped, queued: resyncIntegrated(done) };
@@ -233,4 +257,7 @@ function setWatch(sku, urls) {
   return { watch: store.getPricing(sku).watch };
 }
 
-module.exports = { DEFAULTS, getSettings, saveSettings, evaluate, effectiveProduct, applyStrategy, setManual, clear, setWatch, originPrice, roundPrice, resyncIntegrated };
+module.exports = {
+  DEFAULTS, getSettings, saveSettings, evaluate, effectiveProduct, salePrice, saleKey, applyStrategy, setManual, clear, setWatch,
+  originPrice, roundPrice, resyncIntegrated,
+};

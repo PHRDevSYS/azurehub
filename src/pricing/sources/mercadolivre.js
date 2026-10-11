@@ -30,7 +30,7 @@ module.exports = {
       for (const prod of (found.results || []).slice(0, 3)) {
         const items = await get(`/products/${prod.id}/items?limit=10`);
         for (const it of items.results || []) {
-          if (!it.price) continue;
+          if (!it.price || (it.currency_id && it.currency_id !== 'BRL')) continue;
           out.push({ title: prod.name, price: Number(it.price), url: itemUrl(it.item_id), gtin: q.gtin || null, brand: null, condition: it.condition || 'new', seller: it.seller_id || null });
         }
       }
@@ -41,7 +41,7 @@ module.exports = {
       const res = await get(`/sites/${site}/search?q=${encodeURIComponent(q.text)}&limit=20`).catch((e) => {
         throw new PriceSourceError(`busca do Mercado Livre indisponível para este aplicativo (${e.message})`);
       });
-      for (const r of res.results || []) out.push({ title: r.title, price: Number(r.price), url: r.permalink, gtin: null, brand: null, condition: r.condition || 'new' });
+      for (const r of (res.results || []).filter((x) => !x.currency_id || x.currency_id === 'BRL')) out.push({ title: r.title, price: Number(r.price), url: r.permalink, gtin: null, brand: null, condition: r.condition || 'new' });
     }
     return out;
   },

@@ -25,16 +25,23 @@ function* walk(node) {
   for (const k of ['@graph', 'itemListElement', 'item', 'mainEntity', 'hasVariant']) if (node[k]) yield* walk(node[k]);
 }
 
+// Menor preço disponível em reais. Aceita Offer, lista de Offers,
+// AggregateOffer (lowPrice ou offers internas) e priceSpecification (ignora
+// o preço "de": ListPrice/StrikethroughPrice).
 function offerPrice(offers) {
-  const list = [].concat(offers || []);
   const prices = [];
-  for (const o of list) {
-    if (!o || typeof o !== 'object') continue;
-    const avail = String(o.availability || '');
-    if (/OutOfStock|Discontinued|SoldOut/i.test(avail)) continue;
-    const p = parsePrice(o.price ?? o.lowPrice ?? (o.priceSpecification && o.priceSpecification.price));
+  const visit = (o, depth = 0) => {
+    if (!o || typeof o !== 'object' || depth > 4) return;
+    if (Array.isArray(o)) { o.forEach((x) => visit(x, depth + 1)); return; }
+    if (/OutOfStock|Discontinued|SoldOut/i.test(String(o.availability || ''))) return;
+    const specs = [].concat(o.priceSpecification || []).filter((x) => x && typeof x === 'object' && !/ListPrice|Strikethrough|MSRP/i.test(String(x.priceType || '')));
+    const cur = String(o.priceCurrency || (specs[0] && specs[0].priceCurrency) || '').toUpperCase();
+    if (cur && cur !== 'BRL') return;
+    const p = parsePrice(o.price ?? o.lowPrice ?? (specs[0] && specs[0].price));
     if (p) prices.push(p);
-  }
+    else if (o.offers) visit(o.offers, depth + 1);
+  };
+  visit(offers);
   return prices.length ? Math.min(...prices) : null;
 }
 
@@ -50,8 +57,12 @@ function extract(html, pageUrl) {
       const key = `${n.name}|${price}|${url}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      let abs = pageUrl;
+      try { abs = new URL(String(url), pageUrl).href; } catch { /* URL inválida no JSON-LD: usa a da página */ }
       offers.push({
-        title: String(n.name || '').trim(), price, url: url ? new URL(url, pageUrl).href : pageUrl,
+        title: String(n.name || '').trim(), price, url: /^https?:/i.test(abs) ? abs : pageUrl,
+        // Sem URL própria (ex.: vários produtos numa página de busca): a URL é a da página.
+        pageUrlOnly: abs === pageUrl || !/^https?:/i.test(abs),
         gtin: String(n.gtin13 || n.gtin || n.gtin14 || n.gtin12 || n.gtin8 || '').replace(/\D/g, '') || null,
         brand: n.brand ? (typeof n.brand === 'string' ? n.brand : n.brand.name) : null,
         condition: /UsedCondition|Refurbished/i.test(JSON.stringify(n.offers || {})) ? 'used' : 'new',

@@ -63,7 +63,8 @@ const woocommerce = {
   fields: [BASE_FIELD('https://www.loja.com.br')],
   async search(src, q) {
     const list = await politeGet(`${baseUrl(src)}/wp-json/wc/store/v1/products?search=${encodeURIComponent(q.text)}&per_page=20`, opts(src));
-    return (Array.isArray(list) ? list : []).filter((p) => p.is_in_stock !== false).map((p) => {
+    // Só em estoque e em reais (lojas multimoeda informam currency_code).
+    return (Array.isArray(list) ? list : []).filter((p) => p.is_in_stock !== false && (!p.prices || !p.prices.currency_code || p.prices.currency_code === 'BRL')).map((p) => {
       const pr = p.prices || {};
       const unit = 10 ** Number(pr.currency_minor_unit ?? 2);
       const price = pr.price ? Math.round((Number(pr.price) / unit) * 100) / 100 : null;

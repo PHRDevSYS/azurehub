@@ -25,6 +25,13 @@ const ml = require('../src/pricing/sources/mercadolivre');
 
 const realFetch = global.fetch;
 pzHttp.timing.sleep = async () => {}; // sem esperas reais entre requisições
+// Os sites simulados (*.test) "resolvem" para um IP público; os demais, pelo DNS real.
+const realLookup = pzHttp.resolver.lookup;
+pzHttp.resolver.lookup = async (host) => {
+  if (host === 'interno.test') return [{ address: '10.1.2.3', family: 4 }];
+  if (host === 'misto.test') return [{ address: '93.184.216.34', family: 4 }, { address: '::1', family: 6 }];
+  return /\.test$/.test(host) ? [{ address: '93.184.216.34', family: 4 }] : realLookup(host);
+};
 let server;
 let base;
 let cookie = '';
@@ -56,6 +63,16 @@ function fakeFetch(url, opts = {}) {
     if (u.host === 'bloqueada.test') return Promise.resolve(new Response('User-agent: *\nDisallow: /wp-json/\n'));
     if (u.host === 'fora.test') return Promise.resolve(new Response('erro', { status: 503 }));
     return Promise.resolve(new Response('User-agent: *\nDisallow: /checkout\n'));
+  }
+  if (u.host === 'redir.test') {
+    const to = { '/interno': 'http://169.254.169.254/latest/meta-data/', '/ok': 'https://loja.test/garrafa', '/laco': '/laco' }[u.pathname];
+    return Promise.resolve(new Response(null, { status: 302, headers: { location: to } }));
+  }
+  if (u.host === 'usd.test' && u.pathname === '/wp-json/wc/store/v1/products') {
+    return Promise.resolve(json([
+      { name: 'Garrafa Térmica Stanley Inox 1L', permalink: 'https://usd.test/p/1', is_in_stock: true, prices: { price: '4990', currency_code: 'USD', currency_minor_unit: 2 } },
+      { name: 'Garrafa Térmica Stanley Inox 1L', permalink: 'https://usd.test/p/2', is_in_stock: true, prices: { price: '24990', currency_code: 'BRL', currency_minor_unit: 2 } },
+    ]));
   }
   if (u.host === 'woo.test' && u.pathname === '/wp-json/wc/store/v1/products') {
     return Promise.resolve(json(find(u.searchParams.get('search')).map(([n, p], i) => ({ name: n, permalink: `https://woo.test/p/${i}`, is_in_stock: true, prices: { price: String(Math.round(p * 100)), currency_minor_unit: 2 } }))));
@@ -426,6 +443,172 @@ test('custo fica fora do hash: atualiza o dado sem reenviar', () => {
   assert.equal(store.upsertProduct(b, productHash(b), 'teste'), true, 'custo novo é gravado');
   assert.equal(store.getProduct('H1').data.cost, 6.5);
   assert.equal(store.getProduct('H1').hash, productHash(a));
+});
+
+// ============================================ proteção de rede e limites
+test('bloqueia endereços internos, esquemas e credenciais na URL', async () => {
+  const P = (ip) => pzHttp.isPrivateAddress(ip);
+  for (const ip of ['127.0.0.1', '10.0.0.5', '172.16.0.1', '172.31.255.1', '192.168.1.1', '169.254.169.254', '100.64.1.1', '0.0.0.0', '224.0.0.1',
+    '::1', '::', '::7f00:1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:a9fe:a9fe']) assert.equal(P(ip), true, ip);
+  for (const ip of ['8.8.8.8', '172.32.0.1', '93.184.216.34', '2001:4860:4860::8888', '::ffff:808:808']) assert.equal(P(ip), false, ip);
+
+  for (const url of ['http://127.0.0.1/x', 'http://169.254.169.254/latest/meta-data/', 'http://[::1]:3900/', 'http://[::ffff:127.0.0.1]/',
+    'http://[::127.0.0.1]/', 'http://2130706433/', 'http://0x7f.1/', 'http://localhost.:3900/',
+    'http://localhost:3900/api', 'http://painel.local/', 'http://interno.test/', 'http://misto.test/']) {
+    await assert.rejects(pzHttp.assertPublicUrl(url), /interno/, url);
+  }
+  await assert.rejects(pzHttp.assertPublicUrl('file:///etc/passwd'), /http\(s\)/);
+  await assert.rejects(pzHttp.assertPublicUrl('ftp://loja.test/'), /http\(s\)/);
+  await assert.rejects(pzHttp.assertPublicUrl('https://user:senha@loja.test/'), /usuário/);
+  assert.equal((await pzHttp.assertPublicUrl('https://loja.test/x')).host, 'loja.test');
+
+  process.env.PRICE_ALLOW_PRIVATE = '1';
+  try { assert.equal((await pzHttp.assertPublicUrl('http://127.0.0.1:8801/')).port, '8801'); } finally { delete process.env.PRICE_ALLOW_PRIVATE; }
+
+  // Fontes não chegam a fazer a requisição.
+  resetHttp();
+  await assert.rejects(storefronts.woocommerce.search({ base_url: 'http://169.254.169.254' }, q('x')), /interno/);
+  await assert.rejects(html.fetchPage('http://interno.test/p', {}), /interno/);
+  await assert.rejects(scrapling.search({ search_url: 'http://127.0.0.1/busca?q={query}', item: 'a', title: 'a', price: 'a' }, q('x')), /interno/);
+  assert.equal(hits.length, 0);
+});
+
+test('redirecionamento para rede interna é barrado; para site público é seguido', async () => {
+  resetHttp();
+  await assert.rejects(pzHttp.rawGet('https://redir.test/interno'), /interno/);
+  assert.ok(!hits.some((h) => h.url.includes('169.254')), 'não toca o endereço de metadados');
+  const ok = await pzHttp.rawGet('https://redir.test/ok');
+  assert.equal(ok.url, 'https://loja.test/garrafa');
+  assert.match(ok.text, /229\.90/);
+  await assert.rejects(pzHttp.rawGet('https://redir.test/laco'), /redirecionamentos demais/);
+});
+
+test('corpo da resposta limitado (declarado e real)', async () => {
+  await assert.rejects(pzHttp.readCapped(new Response('abcdef'), 3), /maior que/);
+  await assert.rejects(pzHttp.readCapped(new Response('ab', { headers: { 'content-length': String(50 * 1024 * 1024) } })), /grande demais/);
+  assert.equal(await pzHttp.readCapped(new Response('ábc')), 'ábc');
+});
+
+test('robots.txt sem RegExp: curingas, âncora e padrão hostil rápido', () => {
+  const m = pzHttp.ruleMatches;
+  assert.equal(m('/busca', '/busca?q=1'), true);
+  assert.equal(m('/*.pdf$', '/a/b.pdf'), true);
+  assert.equal(m('/*.pdf$', '/a/b.pdf?x'), false);
+  assert.equal(m('/a*b*c', '/a-x-b-y-c-z'), true);
+  assert.equal(m('/a*b*c', '/a-x-c-y-b'), false);
+  assert.equal(m('/a*c$', '/abcbc'), true);
+  assert.equal(m('/x$', '/x'), true);
+  assert.equal(m('/x$', '/xy'), false);
+  assert.equal(m('*', '/qualquer'), true);
+  const hostile = `/${'*a'.repeat(40)}$`;
+  const t0 = process.hrtime.bigint();
+  assert.equal(m(hostile, `/${'a'.repeat(20000)}b`), false);
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 200, 'padrão hostil não trava');
+});
+
+test('cache em memória tem teto', async () => {
+  resetHttp();
+  for (let i = 0; i < 1010; i++) await pzHttp.politeGet(`https://loja.test/garrafa?i=${i}`, { as: 'text', minIntervalMs: 0 });
+  assert.ok(pzHttp.cache.size <= 1000, String(pzHttp.cache.size));
+  assert.ok(!pzHttp.cache.has('https://loja.test/garrafa?i=0') && pzHttp.cache.has('https://loja.test/garrafa?i=1009'), 'descarta os mais antigos');
+});
+
+test('ofertas: outra moeda é ignorada, JSON-LD variado, sem contar o mesmo anúncio duas vezes', async () => {
+  resetHttp();
+  const usd = await storefronts.woocommerce.search({ base_url: 'https://usd.test' }, q('Garrafa'));
+  assert.deepEqual(usd.map((o) => o.price), [249.9]);
+
+  const page = (...nodes) => nodes.map((n) => `<script type="application/ld+json">${JSON.stringify(n)}</script>`).join('');
+  const offers = html.extract(page(
+    { '@type': 'Product', name: 'A', offers: { '@type': 'AggregateOffer', offers: [{ price: '99.90', priceCurrency: 'BRL' }, { price: '79,90', availability: 'https://schema.org/OutOfStock' }] } },
+    { '@type': 'Product', name: 'B', offers: { price: '50', priceCurrency: 'USD' } },
+    { '@type': 'Product', name: 'C', url: 'http://[quebrada', offers: { priceSpecification: [{ priceType: 'https://schema.org/ListPrice', price: 200 }, { price: 150 }] } },
+    { '@type': 'Product', name: 'D', url: 'javascript:alert(1)', offers: { price: 10 } },
+  ), 'https://busca.test/?q=x');
+  assert.deepEqual(offers.map((o) => [o.title, o.price, o.url, o.pageUrlOnly]), [
+    ['A', 99.9, 'https://busca.test/?q=x', true], ['C', 150, 'https://busca.test/?q=x', true], ['D', 10, 'https://busca.test/?q=x', true]]);
+
+  const { dedupe } = research;
+  const list = [
+    { source: 'Woo', url: 'https://loja.test/garrafa/?_pos=1&utm_source=x', price: 229.9, score: 0.9 },
+    { source: 'URL monitorada', url: 'https://loja.test/garrafa', price: 229.9, score: 1 },
+    { source: 'Busca', url: 'https://busca.test/?q=x', pageUrlOnly: true, title: 'A', price: 99.9, score: 0.8 },
+    { source: 'Busca', url: 'https://busca.test/?q=x', pageUrlOnly: true, title: 'C', price: 150, score: 0.8 },
+  ];
+  assert.deepEqual(dedupe(list).map((o) => o.source + ':' + (o.title || o.price)), ['URL monitorada:229.9', 'Busca:A', 'Busca:C']);
+});
+
+// ============================================ preço efetivo × origem/custo
+test('preço aplicado acompanha origem e custo atuais (teto e piso no envio)', async () => {
+  const push = (p) => realFetch(`${base}/api/v1/products`, { method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify(p) })
+    .then((r) => r.json());
+  await call('PUT', '/api/pricing/settings', { enabled: true, showOriginAsList: false, maxDiscountPct: 30, minMarginPct: 10 });
+  const base0 = { sku: 'PAN', title: 'Panela', price: 120, promoPrice: 100, promoStart: '2026-10-01T00:00:00Z', promoEnd: '2026-10-31T00:00:00Z', stock: 2, images: ['https://img.test/p.jpg'] };
+  await push(base0);
+  store.saveResearch('PAN', { query: { text: 'Panela' }, offers: [], sources: [], stats: { count: 3, min: 80, max: 110, median: 95, avg: 95 } });
+  store.selectForPlatform('mercadolivre', 'PAN');
+
+  let r = await call('POST', '/api/pricing/apply', { skus: ['PAN'], strategy: 'minimo' });
+  assert.equal(r.body.applied, 1);
+  let row = (await call('GET', '/api/pricing/PAN')).body;
+  assert.deepEqual([row.price, row.effective, row.adjusted], [80, 80, false]);
+  let eff = pricing.effectiveProduct(store.getProduct('PAN').data);
+  assert.deepEqual([eff.price, eff.promoPrice, eff.promoStart, eff.promoEnd], [80, null, null, null], 'janela da origem não vaza');
+  store.saveListing('mercadolivre', 'PAN', { status: 'synced', external_id: 'MLB2', last_hash: store.syncHashOf(store.getProduct('PAN')) });
+  store.clearFinishedJobs();
+
+  // A origem caiu para 75: o envio não passa do teto.
+  await push({ ...base0, promoPrice: 75 });
+  row = (await call('GET', '/api/pricing/PAN')).body;
+  assert.deepEqual([row.price, row.effective, row.adjusted], [80, 75, true]);
+  assert.equal(pricing.effectiveProduct(store.getProduct('PAN').data).price, 75);
+  const sync = (await call('GET', '/api/sync?platform=mercadolivre')).body.items.find((i) => i.sku === 'PAN');
+  assert.deepEqual([sync.outdated, sync.salePrice], [true, 75]);
+  assert.ok(store.listJobs().some((j) => j.sku === 'PAN' && j.status === 'queued'), 'reenvio na fila');
+
+  // Volta a origem; o custo sobe (fora do hash do produto): o piso sobe e o envio acompanha.
+  await push(base0);
+  store.saveListing('mercadolivre', 'PAN', { last_hash: store.syncHashOf(store.getProduct('PAN')) });
+  const before = store.syncHashOf(store.getProduct('PAN'));
+  await push({ ...base0, cost: 80 });
+  row = (await call('GET', '/api/pricing/PAN')).body;
+  assert.deepEqual([row.floor, row.effective, row.adjusted], [88, 88, true]);
+  assert.notEqual(store.syncHashOf(store.getProduct('PAN')), before, 'preço efetivo novo → hash novo');
+
+  // Margem mínima menor nas regras: o piso volta a 70 e o reenvio entra na fila.
+  store.saveListing('mercadolivre', 'PAN', { last_hash: store.syncHashOf(store.getProduct('PAN')) });
+  store.clearFinishedJobs();
+  r = await call('PUT', '/api/pricing/settings', { minMarginPct: 0 });
+  assert.ok(r.body.queued >= 1);
+  assert.equal((await call('GET', '/api/pricing/PAN')).body.effective, 80);
+
+  // Manual é respeitado como digitado, mesmo acima da origem.
+  await call('POST', '/api/pricing/manual', { sku: 'PAN', price: 130 });
+  assert.equal(pricing.effectiveProduct(store.getProduct('PAN').data).price, 130);
+
+  // "Origem" não grava número: acompanha a origem quando ela muda.
+  r = await call('POST', '/api/pricing/apply', { skus: ['PAN'], strategy: 'origem' });
+  assert.deepEqual([store.getPricing('PAN').price, store.getPricing('PAN').strategy], [null, 'origem']);
+  await push({ ...base0, promoPrice: 90 });
+  row = (await call('GET', '/api/pricing/PAN')).body;
+  assert.deepEqual([row.strategy, row.effective, row.adjusted], ['origem', 90, false]);
+  assert.equal(pricing.effectiveProduct(store.getProduct('PAN').data).promoPrice, 90, 'envia a origem como ela é');
+  assert.equal((await call('GET', '/api/products?limit=50')).body.items.find((i) => i.sku === 'PAN').salePrice, null);
+});
+
+test('pesquisa já em andamento não inicia outra', async () => {
+  resetHttp();
+  global.fetch = (u, o) => new Promise((ok) => setTimeout(ok, 40)).then(() => fakeFetch(u, o)); // pesquisa "lenta"
+  try {
+    const first = (await call('POST', '/api/pricing/research', { skus: ['TEN', 'GAR'] })).body;
+    const second = (await call('POST', '/api/pricing/research', { skus: ['TEN'] })).body;
+    assert.equal(first.started, true);
+    assert.equal(second.started, false);
+    assert.equal(second.total, 2, 'devolve o andamento da que já roda');
+    await waitResearch();
+  } finally {
+    global.fetch = fakeFetch;
+  }
 });
 
 test('rotas de precificação exigem sessão', async () => {

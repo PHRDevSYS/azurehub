@@ -71,11 +71,18 @@ async function checkSource(cfg) {
 
 const list = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((x) => String(x).trim()).filter(Boolean);
 
-// Preço de venda definido na Precificação (quando o módulo está ativo).
+// Preço de venda efetivo da Precificação (quando o módulo está ativo).
 function withSalePrice(data) {
-  if (!pricing.getSettings().enabled) return data;
-  const pr = store.pricingFor([...new Set(data.items.map((i) => i.sku))]);
-  for (const i of data.items) i.salePrice = pr[i.sku] && pr[i.sku].price !== null ? pr[i.sku].price : null;
+  const cfg = pricing.getSettings();
+  if (!cfg.enabled) return data;
+  const skus = [...new Set(data.items.map((i) => i.sku))];
+  const pr = store.pricingFor(skus);
+  const sale = {};
+  for (const sku of skus) {
+    const prod = pr[sku] && store.getProduct(sku);
+    sale[sku] = prod ? pricing.salePrice(prod.data, pr[sku], cfg) : null;
+  }
+  for (const i of data.items) i.salePrice = sale[i.sku];
   return data;
 }
 

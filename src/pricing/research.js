@@ -64,12 +64,14 @@ async function researchOne(sku, cfg, ctx) {
   for (const url of watch) {
     try {
       const found = await html.fetchPage(url, { respect_robots: true, cache_hours: cfg.cacheHours });
-      if (found[0]) offers.push({ ...found[0], url, source: 'URL monitorada', matchedBy: 'url', score: 1 });
+      // A URL monitorada é a do próprio anúncio: vale como chave para não contar em dobro.
+      if (found[0]) offers.push({ ...found[0], url, pageUrlOnly: false, source: 'URL monitorada', matchedBy: 'url', score: 1 });
       sources.push({ name: `URL monitorada (${new URL(url).host})`, type: 'watch', ok: !!found[0], count: found.length ? 1 : 0, error: found.length ? undefined : 'preço não encontrado na página' });
     } catch (e) {
       sources.push({ name: `URL monitorada (${new URL(url).host})`, type: 'watch', ok: false, error: e.message });
     }
   }
+  dedupe(offers);
   const accepted = offers.filter((o) => o.price > 0 && o.condition !== 'used' && o.score >= cfg.minSimilarity);
   const marked = markOutliers(accepted);
   const valid = marked.filter((o) => !o.outlier);
@@ -88,9 +90,35 @@ async function researchOne(sku, cfg, ctx) {
   return result;
 }
 
+// O mesmo anúncio não conta duas vezes na mediana (ex.: URL monitorada que
+// também veio na busca). Fica a cópia com a maior similaridade.
+function offerKey(o) {
+  if (o.url && !o.pageUrlOnly) {
+    try {
+      const u = new URL(o.url);
+      for (const k of [...u.searchParams.keys()]) if (/^(_|utm_)/.test(k)) u.searchParams.delete(k);
+      u.hash = '';
+      return u.href.replace(/\/+(\?|$)/, '$1').toLowerCase();
+    } catch { /* URL inválida: cai na chave por título */ }
+  }
+  return `${o.source}|${String(o.title || '').toLowerCase()}|${o.price}`;
+}
+
+function dedupe(offers) {
+  const best = new Map();
+  for (const o of offers) {
+    const k = offerKey(o);
+    const cur = best.get(k);
+    if (!cur || o.score > cur.score) best.set(k, o);
+  }
+  const keep = new Set(best.values());
+  for (let i = offers.length - 1; i >= 0; i--) if (!keep.has(offers[i])) offers.splice(i, 1);
+  return offers;
+}
+
 // Inicia (ou devolve a que já está rodando).
 function start(skus) {
-  if (task && task.running) return status();
+  if (task && task.running) return { ...status(), started: false };
   const cfg = require('./index').getSettings();
   if (!cfg.sources.some((s) => s.enabled !== false)) throw new Error('Cadastre ao menos uma fonte de pesquisa em Precificação › Fontes');
   task = { running: true, total: skus.length, done: 0, current: null, errors: 0, startedAt: store.now(), finishedAt: null };
@@ -112,7 +140,7 @@ function start(skus) {
     task.finishedAt = store.now();
     store.log('info', `Pesquisa de preços concluída: ${task.done} produto(s), ${task.errors} sem resposta das fontes`);
   })();
-  return status();
+  return { ...status(), started: true };
 }
 
-module.exports = { SOURCES, start, status, researchOne, makeCtx };
+module.exports = { SOURCES, start, status, researchOne, makeCtx, dedupe, offerKey };
