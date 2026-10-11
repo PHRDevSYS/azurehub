@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AzureHub</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="icon.svg" alt=""> AzureHub <span class="badge beta">BETA</span></div>
+    <div class="top-right">
+      <span id="version" class="muted"></span>
+      <button id="btn-logout" class="ghost hidden">Sair</button>
+    </div>
+  </header>
+
+  <main id="app"><p class="muted center">Carregando…</p></main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <dialog id="dlg">
+    <form method="dialog" id="dlg-form">
+      <h3 id="dlg-title"></h3>
+      <div id="dlg-body"></div>
+      <div class="actions">
+        <button value="cancel" class="ghost" formnovalidate>Cancelar</button>
+        <button value="ok" id="dlg-ok" class="primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
