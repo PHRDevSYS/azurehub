@@ -313,7 +313,7 @@ const PLAT_SHORT = { mercadolivre: 'ML', shopee: 'Shopee', tiktok: 'TikTok' };
 
 function listingBadge(l) {
   if (!l) return '<span class="badge">—</span>';
-  const cls = l.status === 'synced' ? (l.last_error ? 'warn' : 'ok') : l.status === 'error' ? 'err' : '';
+  const cls = l.status === 'synced' ? (l.last_error ? 'warn' : 'ok') : l.status === 'error' ? 'err' : l.status === 'skipped' ? 'warn' : '';
   const title = [l.external_id && `ID ${l.external_id}`, l.last_error].filter(Boolean).join(' — ');
   return `<span class="badge ${cls}" title="${esc(title)}">${esc(l.status)}</span>`;
 }

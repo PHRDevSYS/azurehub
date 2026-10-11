@@ -40,7 +40,7 @@ async function requestJson(url, { method = 'GET', headers = {}, body, form, time
   return data;
 }
 
-async function download(url, { kind = 'image' } = {}) {
+async function download(url, { kind = 'image', maxBytes = config.maxMediaBytes } = {}) {
   let res;
   try {
     res = await fetch(url, { signal: AbortSignal.timeout(kind === 'video' ? 300000 : 60000) });
@@ -49,9 +49,11 @@ async function download(url, { kind = 'image' } = {}) {
   }
   if (!res.ok) throw new PlatformError(`Não consegui baixar ${kind} ${url}: HTTP ${res.status}`, { status: res.status });
   const len = Number(res.headers.get('content-length') || 0);
-  if (len > config.maxMediaBytes) throw new PlatformError(`${kind} ${url} passa de ${config.maxMediaBytes / 1048576} MB`);
+  const limitMsg = `${kind} ${url} passa do limite de ${Math.round(maxBytes / 1048576)} MB`;
+  if (len > maxBytes) throw new PlatformError(limitMsg);
   const buffer = Buffer.from(await res.arrayBuffer());
-  if (buffer.length > config.maxMediaBytes) throw new PlatformError(`${kind} ${url} passa de ${config.maxMediaBytes / 1048576} MB`);
+  if (buffer.length > maxBytes) throw new PlatformError(limitMsg);
+  if (!buffer.length) throw new PlatformError(`${kind} ${url} está vazio (0 bytes)`);
   const contentType = (res.headers.get('content-type') || '').split(';')[0] ||
     (kind === 'video' ? 'video/mp4' : 'image/jpeg');
   const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || `${kind}`) ||

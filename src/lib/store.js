@@ -197,7 +197,7 @@ function saveListing(platform, sku, fields) {
 }
 function listingStats(platform) {
   const rows = all('SELECT status, COUNT(*) AS n FROM listings WHERE platform = ? GROUP BY status', platform);
-  const out = { synced: 0, error: 0, pending: 0 };
+  const out = { synced: 0, error: 0, pending: 0, skipped: 0 };
   for (const r of rows) out[r.status] = r.n;
   return out;
 }

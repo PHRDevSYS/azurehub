@@ -1,5 +1,5 @@
 'use strict';
-// Publicação na Shopee e no TikTok com as APIs simuladas: confere upload de
+// Publicação na Shopee com a API simulada: confere upload de
 // fotos/vídeo, corpo do anúncio e promoção. Também testa a fonte SQLite.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -7,7 +7,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const shopee = require('../src/platforms/shopee');
-const tiktok = require('../src/platforms/tiktok');
 const { normalizeProduct } = require('../src/source/normalize');
 const source = require('../src/source');
 
@@ -84,37 +83,6 @@ test('Shopee: erro no corpo (HTTP 200) vira exceção', async () => {
   });
   const ctx = { creds: { partner_id: '1', partner_key: 'k', logistic_ids: '1' }, tokens: { access_token: 'AT', shop_id: '42' } };
   await assert.rejects(shopee.publish(ctx, { ...product, videos: [] }, null), /categoria inválida/);
-});
-
-test('TikTok: sobe imagem e vídeo, cria produto com SKU e aplica promoção', async () => {
-  const calls = mock({
-    '/product/202309/images/upload': () => ({ code: 0, data: { uri: 'tos-img' } }),
-    '/product/202309/files/upload': () => ({ code: 0, data: { id: 'vid-9' } }),
-    '/logistics/202309/warehouses': () => ({ code: 0, data: { warehouses: [{ id: 'W1', type: 'SALES_WAREHOUSE', is_default: true }] } }),
-    '/product/202309/products': () => ({ code: 0, data: { product_id: 'TT1', skus: [{ id: 'S1' }] } }),
-    '/promotion/202309/activities': () => ({ code: 0, data: { activity_id: 'A1' } }),
-  });
-  const ctx = { creds: { app_key: 'ak', app_secret: 'as' }, tokens: { access_token: 'AT', shop_cipher: 'CIPH' } };
-  const res = await tiktok.publish(ctx, product, null);
-
-  assert.equal(res.externalId, 'TT1');
-  assert.deepEqual(res.warnings, []);
-  const create = calls.find((c) => c.path === '/product/202309/products');
-  assert.equal(create.query.get('shop_cipher'), 'CIPH');
-  assert.equal(create.body.category_id, '601739');
-  assert.deepEqual(create.body.main_images, [{ uri: 'tos-img' }]);
-  assert.deepEqual(create.body.video, { id: 'vid-9' });
-  assert.deepEqual(create.body.skus[0].price, { amount: '199.90', currency: 'BRL' });
-  assert.deepEqual(create.body.skus[0].inventory, [{ warehouse_id: 'W1', quantity: 3 }]);
-  assert.match(create.body.description, /^<p>Som limpo<\/p><p>Bateria 20h<\/p>$/);
-  const promo = calls.find((c) => c.path === '/promotion/202309/activities/A1/products');
-  assert.equal(promo.body.products[0].skus[0].activity_price_amount, '149.90');
-});
-
-test('TikTok: code != 0 vira exceção', async () => {
-  mock({ '/product/202309/images/upload': () => ({ code: 12052048, message: 'imagem inválida' }) });
-  const ctx = { creds: { app_key: 'ak', app_secret: 'as' }, tokens: { access_token: 'AT', shop_cipher: 'C' } };
-  await assert.rejects(tiktok.publish(ctx, product, null), /imagem inválida/);
 });
 
 test('fonte SQLite: consulta o banco do site e normaliza', async () => {

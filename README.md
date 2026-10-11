@@ -6,7 +6,7 @@ preço, preço promocional, estoque, peso/dimensões, marca/GTIN, fotos e vídeo
 
 ![Painel](docs/painel.png)
 
-> **Versão beta (0.1.0-beta.1).** O fluxo completo está implementado e coberto
+> **Versão beta (0.1.0-beta.2).** O fluxo completo está implementado e coberto
 > por testes com as APIs simuladas, mas ainda **não foi validado contra os
 > sandboxes reais** das plataformas — ver [Antes de ir para produção](#antes-de-ir-para-produção).
 
@@ -123,11 +123,37 @@ Em todas, cadastre no app do desenvolvedor a **URL de retorno** exibida no card:
   partes de 4 MB). Promoção via `discount/add_discount`.
 
 ### TikTok Shop
+Conector conferido com a referência oficial (<https://partner.tiktokshop.com/docv2>).
+
 - Crie o app no TikTok Shop Partner Center (<https://partner.tiktokshop.com>).
 - Informe **App Key**, **App Secret** e **Service ID**; cadastre o callback no app.
-- A loja (`shop_cipher`) e o armazém são descobertos automaticamente.
-- Categoria: `category_tiktok` no produto, categoria padrão ou **recomendação
-  pelo título**. Promoção via campanha `FIXED_PRICE`.
+  Lojas dos EUA usam o host de autorização `services.us.tiktokshop.com`.
+- A loja (`shop_cipher`, região) e o armazém de vendas ativo são descobertos
+  automaticamente.
+- **Categoria:** `category_tiktok` no produto, categoria padrão ou recomendação
+  por título + descrição + fotos. Categoria recomendada sem permissão para a
+  loja (`INVITE_ONLY`, `PROHIBITED`…) vira erro explicativo.
+- **Atributos obrigatórios da categoria** são consultados e casados com
+  `attributes` do produto (chave = nome ou id do atributo na TikTok, valor =
+  nome ou id da opção). Se faltar algum, o erro lista quais são e as opções.
+- **Fotos** (até 9, máx. 10 MB) e **vídeo** (máx. 100 MB; MP4, MOV, WEBM…) são
+  enviados à TikTok. O nome do vídeo é saneado (sem espaços nem pontos extras).
+- **Estoque**: a TikTok só aceita de 1 a 99.999 por SKU. Produto sem estoque ou
+  inativo é **desativado** (e reativado quando o estoque volta); se ainda não
+  existir na TikTok, a criação é adiada (status `skipped`).
+- **Atualização sem auditoria desnecessária:** preço e estoque usam os
+  endpoints próprios (publicação imediata); título, descrição, fotos, vídeo,
+  peso e atributos só são reenviados (Partial Edit 202509, que dispara nova
+  auditoria) quando mudam de fato.
+- **GTIN/EAN** vai só na criação (a TikTok só permite alterá-lo em rascunho).
+- **Promoção:** campanha `FIXED_PRICE` por produto; removida do produto quando
+  o `promoPrice` some. Mudança de preço com promoção ativa pode ser recusada
+  pela TikTok (vira aviso no log).
+- Criação com `idempotency_key`: uma nova tentativa após queda de rede não
+  duplica o produto.
+- *Get Authorized Category Assets* (`/authorization/202405/category_assets`)
+  é da autorização de **parceiro** (APIs de Affiliate Partner / TAP) e não se
+  aplica à publicação de produtos do vendedor; o hub não o utiliza.
 
 ## API para o site
 
@@ -195,20 +221,20 @@ public/                painel (HTML/CSS/JS puro)
 test/                  node:test (APIs das plataformas simuladas)
 ```
 
-Testes: `npm test` (17 casos: instalação, autenticação, cofre, publicação nas
-três plataformas com fotos/vídeo/promoção, backoff, fonte SQLite, assinaturas).
+Testes: `npm test` (28 casos: instalação, autenticação, cofre, publicação nas
+três plataformas com fotos/vídeo/promoção, regras do TikTok (atributos,
+estoque, desativação, edição parcial), backoff, fonte SQLite, assinaturas).
 
 ## Antes de ir para produção
 
 Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandboxes:
 
-- [ ] **Validar nos sandboxes reais** com apps de teste das três plataformas.
-      Prioridade para os pontos marcados `VALIDAR NO SANDBOX` em
-      `src/platforms/tiktok.js` (upload de vídeo e campanha de preço).
-- [ ] **Atributos obrigatórios por categoria** — ML, Shopee e TikTok exigem
-      atributos diferentes por categoria. O beta envia marca, modelo, GTIN e
-      `attributes` livres; a próxima versão deve consultar os atributos da
-      categoria e mapear.
+- [ ] **Validar nos sandboxes reais** com apps de teste das três plataformas
+      (o TikTok já foi conferido contra a documentação oficial; falta a
+      chamada real).
+- [ ] **Atributos obrigatórios por categoria** no Mercado Livre e na Shopee
+      (o TikTok já consulta e valida). Hoje os dois recebem marca, modelo, GTIN
+      e `attributes` livres.
 - [ ] **Variações** (cor/tamanho). O beta publica 1 SKU por anúncio.
 - [ ] **Vídeo no Mercado Livre** por arquivo (clips); hoje só YouTube.
 - [ ] **Webhooks/notificações** das plataformas (pedidos, perguntas, mudança
@@ -219,6 +245,6 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
 Documentação de referência:
 [Mercado Livre](https://developers.mercadolivre.com.br/pt_br/api-docs-pt-br) ·
 [Shopee Open Platform](https://open.shopee.com/documents) ·
-[TikTok Shop Partner](https://partner.tiktokshop.com/docv2) ·
+[TikTok Shop Partner](https://partner.tiktokshop.com/docv2/page/create-product-202309) ·
 [Plug4Market](https://api.plug4market.com.br/docs) (referência de modelo de hub) ·
 [projetos no GitHub](https://github.com/topics/api-mercado-livre).
