@@ -106,6 +106,9 @@ module.exports = {
   },
 
   async publish(ctx, p, listing) {
+    if (p.variants && p.variants.length) {
+      throw new PlatformError('TikTok Shop: produtos com variações (cor/tamanho) ainda não são publicados por este conector');
+    }
     const productId = listing && listing.external_id;
     return productId ? update(ctx, p, listing) : create(ctx, p);
   },

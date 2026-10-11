@@ -53,6 +53,9 @@ module.exports = {
   },
 
   async publish(ctx, p, listing) {
+    if (p.variants && p.variants.length) {
+      throw new PlatformError('Mercado Livre: produtos com variações (cor/tamanho) ainda não são publicados por este conector');
+    }
     const warnings = [];
     const meta = {};
     const pictures = p.images.slice(0, 10).map((source) => ({ source }));

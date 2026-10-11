@@ -27,16 +27,21 @@ async function processJob(job) {
     const ctx = await platforms.context(platform);
     const res = await ctx.platform.publish(ctx, product.data, listing);
     // Sem externalId = a plataforma adiou a criação (ex.: TikTok sem estoque).
+    // followUpMs = há etapa pendente (ex.: vídeo transcodificando): volta à fila.
     store.saveListing(platform, sku, {
-      external_id: res.externalId, status: res.externalId ? 'synced' : 'skipped', last_hash: product.hash,
+      external_id: res.externalId, status: res.externalId ? 'synced' : 'skipped',
+      last_hash: res.followUpMs ? null : product.hash,
       meta: res.meta, last_error: res.warnings.length ? res.warnings.join(' | ') : null, last_sync: store.now(),
     });
     store.finishJob(job.id, 'done');
+    if (res.followUpMs) store.enqueue(platform, sku, res.followUpMs);
     if (res.externalId) store.log('info', `${listing && listing.external_id ? 'Atualizado' : 'Publicado'} → ${res.externalId}`, { platform, sku });
     for (const w of res.warnings) store.log('warn', w, { platform, sku });
   } catch (e) {
     const retry = e.retryable && job.attempts < MAX_ATTEMPTS;
-    store.saveListing(platform, sku, { status: 'error', last_error: e.message, last_sync: store.now() });
+    // Falha depois de criar o anúncio: guarda o id para não duplicar na próxima tentativa.
+    const partial = e.partial ? { external_id: e.partial.externalId, meta: e.partial.meta, last_hash: null } : {};
+    store.saveListing(platform, sku, { ...partial, status: 'error', last_error: e.message, last_sync: store.now() });
     if (retry) {
       const delay = Math.min(30 * 60e3, 15e3 * 2 ** (job.attempts - 1));
       store.finishJob(job.id, 'queued', e.message, delay);

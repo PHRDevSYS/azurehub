@@ -409,8 +409,14 @@ const TABS = {
     "images": ["https://meusite.com/img/cam-001-1.jpg", "https://meusite.com/img/cam-001-2.jpg"],
     "videos": ["https://meusite.com/video/cam-001.mp4", "https://youtu.be/XXXXXXXXXXX"],
     "categories": { "mercadolivre": "MLB31447", "shopee": 100017, "tiktok": "601226" },
-    "attributes": { "COLOR": "Azul", "SIZE": "M" }
+    "attributes": { "Material": "Algodão" },
+    "sizeChart": "https://meusite.com/img/tabela.png",
+    "variants": [
+      { "sku": "CAM-001-AZ-P", "options": { "Cor": "Azul", "Tamanho": "P" }, "price": 89.90, "stock": 5 },
+      { "sku": "CAM-001-AZ-M", "options": { "Cor": "Azul", "Tamanho": "M" }, "price": 89.90, "stock": 3 }
+    ]
   }'</pre>
+      <p class="muted"><code>attributes</code>: chave = nome do atributo na plataforma, valor = opção. <code>variants</code> (cor/tamanho) já publica na Shopee.</p>
       <p class="muted">Aceita um produto, uma lista <code>[...]</code> ou <code>{"products": [...]}</code> (até 1000 por envio).</p>
       <h3>Consultar status de um produto</h3>
       <pre>curl ${esc(base)}/api/v1/products/CAM-001 -H "X-Api-Key: SUA_CHAVE"</pre>

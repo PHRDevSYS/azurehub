@@ -203,13 +203,14 @@ function listingStats(platform) {
 }
 
 // ---------- fila ----------
-function enqueue(platform, sku) {
+function enqueue(platform, sku, delayMs = 0) {
   // Um job ativo por (plataforma, sku): reenfileirar só "acorda" o existente.
-  const open_ = get(`SELECT id FROM jobs WHERE platform = ? AND sku = ? AND status IN ('queued','running')`, platform, sku);
+  const open_ = get(`SELECT id FROM jobs WHERE platform = ? AND sku = ? AND status = 'queued'`, platform, sku);
   if (open_) return open_.id;
   const t = now();
+  const runAfter = new Date(Date.now() + delayMs).toISOString();
   return Number(run(`INSERT INTO jobs(platform, sku, status, attempts, run_after, created_at, updated_at)
-    VALUES(?, ?, 'queued', 0, ?, ?, ?)`, platform, sku, t, t, t).lastInsertRowid);
+    VALUES(?, ?, 'queued', 0, ?, ?, ?)`, platform, sku, runAfter, t, t).lastInsertRowid);
 }
 function finishJob(id, status, error = null, retryInMs = 0) {
   const runAfter = new Date(Date.now() + retryInMs).toISOString();

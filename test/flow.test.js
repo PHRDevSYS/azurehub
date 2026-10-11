@@ -140,3 +140,36 @@ test('erro 429 da plataforma volta para a fila com backoff', async () => {
   assert.equal(after.status, 'queued');
   assert.ok(new Date(after.run_after) > new Date());
 });
+
+test('motor: falha parcial guarda o id externo e follow-up volta à fila', async () => {
+  const ml = require('../src/platforms').REGISTRY.mercadolivre;
+  const original = ml.publish;
+  try {
+    store.saveListing('mercadolivre', 'CAM-1', { external_id: null, last_hash: null, meta: {} });
+    store.open().prepare(`DELETE FROM listings WHERE platform = 'mercadolivre' AND sku = 'CAM-1'`).run();
+    ml.publish = async () => {
+      const e = new Error('variações falharam');
+      e.partial = { externalId: 'MLB-PARCIAL', meta: { x: 1 } };
+      throw e;
+    };
+    const id = store.enqueue('mercadolivre', 'CAM-1');
+    await engine.processJob({ ...store.open().prepare('SELECT * FROM jobs WHERE id = ?').get(id), attempts: 1 });
+    let l = store.getListing('mercadolivre', 'CAM-1');
+    assert.equal(l.external_id, 'MLB-PARCIAL');
+    assert.equal(l.status, 'error');
+
+    ml.publish = async (ctx, p, listing) => {
+      assert.equal(listing.external_id, 'MLB-PARCIAL', 'nova tentativa continua do item já criado');
+      return { externalId: 'MLB-PARCIAL', meta: {}, warnings: [], followUpMs: 60000 };
+    };
+    const id2 = store.enqueue('mercadolivre', 'CAM-1');
+    await engine.processJob({ ...store.open().prepare('SELECT * FROM jobs WHERE id = ?').get(id2), attempts: 1 });
+    l = store.getListing('mercadolivre', 'CAM-1');
+    assert.equal(l.status, 'synced');
+    assert.equal(l.last_hash, null, 'follow-up não pode ser pulado como "sem alterações"');
+    const next = store.open().prepare(`SELECT * FROM jobs WHERE platform = 'mercadolivre' AND sku = 'CAM-1' AND status = 'queued'`).get();
+    assert.ok(next && new Date(next.run_after) > new Date(Date.now() + 50000));
+  } finally {
+    ml.publish = original;
+  }
+});

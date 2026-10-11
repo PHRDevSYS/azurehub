@@ -5,7 +5,7 @@
 // Assim qualquer site — WooCommerce, Magento, ERP próprio — se integra só
 // ajustando a consulta. Use SEMPRE um usuário de banco somente-leitura.
 const store = require('../lib/store');
-const { normalizeProduct, validateProduct, productHash } = require('./normalize');
+const { normalizeProduct, validateProduct, productHash, groupVariantRows } = require('./normalize');
 const PRESETS = require('./presets');
 
 function loadDriver(name) {
@@ -67,12 +67,12 @@ async function query(source) {
 // Testa a conexão e devolve uma amostra já normalizada (sem gravar nada).
 async function testSource(source) {
   if (source.type === 'api') return { ok: true, count: 0, sample: [], note: 'Modo somente API: o site envia os produtos via POST /api/v1/products' };
-  const rows = await query(source);
-  const sample = rows.slice(0, 3).map((r) => {
+  const products = groupVariantRows(await query(source));
+  const sample = products.slice(0, 3).map((r) => {
     const p = normalizeProduct(r);
     return { product: p, errors: validateProduct(p) };
   });
-  return { ok: true, count: rows.length, sample };
+  return { ok: true, count: products.length, sample };
 }
 
 // Grava produtos no hub e enfileira sync nas plataformas ativas.
@@ -101,7 +101,7 @@ function ingest(rawProducts, origin) {
 async function importFromSource() {
   const source = store.getSecretSetting('source');
   if (!source || source.type === 'api') return { received: 0, changed: 0, unchanged: 0, invalid: [], note: 'Fonte em modo somente API' };
-  const rows = await query(source);
+  const rows = groupVariantRows(await query(source));
   const result = ingest(rows, 'db');
   store.log('info', `Importação da fonte: ${result.received} lidos, ${result.changed} alterados, ${result.invalid.length} inválidos`);
   return result;
