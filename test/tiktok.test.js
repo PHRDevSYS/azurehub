@@ -219,3 +219,22 @@ test('helpers: nome de vídeo, GTIN e peso', () => {
   assert.equal(weight(0.23456), '0.235');
   assert.equal(weight(0), '0.001');
 });
+
+test('PRÉVIA online: recomenda categoria, valida atributos e armazém sem subir mídia nem criar produto', async () => {
+  const calls = mock({
+    ...createRoutes(),
+    '/product/202309/categories/recommend': () => ({ code: 0, data: { leaf_category_id: '601739', categories: [{ id: '601739', name: 'Fones', permission_statuses: ['AVAILABLE'] }] } }),
+  });
+  const r = await tiktok.preview(ctx(), product({ categories: {}, attributes: {} }));
+  assert.ok(!calls.some((c) => /upload|\/products$|activities/.test(c.path)), 'nada de upload, criação ou promoção');
+  assert.match(r.errors.join(), /exige os atributos "Material"/);
+  const f = Object.fromEntries(r.fields.map((x) => [x.label, x.value]));
+  assert.equal(f['Categoria'], '601739');
+  assert.equal(f['SKU do vendedor'], 'FONE-01');
+  assert.match(f['Estoque'], /^3$/);
+});
+
+test('PRÉVIA: variações e estoque zero explicados', async () => {
+  const r = await tiktok.preview(null, product({ stock: 0, variants: [{ sku: 'A', options: { Cor: 'Azul' } }] }));
+  assert.match(r.errors.join(), /variações ainda não/);
+});

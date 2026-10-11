@@ -19,7 +19,11 @@ async function processJob(job) {
     return;
   }
   const listing = store.getListing(platform, sku);
-  if (listing && listing.status === 'synced' && listing.last_hash === product.hash) {
+  if (!listing || listing.status === 'paused') {
+    store.finishJob(job.id, 'done', listing ? 'sincronização pausada' : 'produto não selecionado para este destino');
+    return;
+  }
+  if (listing.status === 'synced' && listing.last_hash === product.hash) {
     store.finishJob(job.id, 'done', 'sem alterações');
     return;
   }
@@ -73,15 +77,17 @@ function nextFor(platform) {
   return { ...job, attempts: job.attempts + 1 };
 }
 
+// Reenvia: com `skus`, seleciona-os para o destino; sem, reenvia todos os
+// produtos já selecionados. Força o envio mesmo sem alteração.
 function enqueueAll(platform, skus) {
   const targets = platform ? [platform] : platforms.ids().filter(store.isEnabled);
-  const list = skus && skus.length ? skus : store.open().prepare('SELECT sku FROM products').all().map((r) => r.sku);
   let n = 0;
   for (const p of targets) {
+    const list = skus && skus.length ? skus : store.selectedSkus(p);
     for (const sku of list) {
-      // Força reenvio mesmo sem alteração de conteúdo.
-      const l = store.getListing(p, sku);
-      if (l) store.saveListing(p, sku, { last_hash: null });
+      if (!store.getProduct(sku)) continue;
+      store.selectForPlatform(p, sku);
+      store.saveListing(p, sku, { last_hash: null });
       store.enqueue(p, sku);
       n++;
     }

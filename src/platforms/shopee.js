@@ -26,6 +26,7 @@
 //   Com promoção ativa, o preço original não pode ser alterado.
 const { requestJson, download, PlatformError } = require('../lib/media');
 const { hmacHex, md5, sha256 } = require('../lib/crypto');
+const H_ = require('./preview-helpers');
 
 const ENVS = {
   production: {
@@ -165,6 +166,8 @@ module.exports = {
   async publish(ctx, p, listing) {
     return listing && listing.external_id ? update(ctx, p, listing) : create(ctx, p);
   },
+
+  preview: (ctx, p) => preview(ctx, p),
 };
 
 function toTokens(data, shopId) {
@@ -293,34 +296,53 @@ function result(itemId, meta, warnings, prep) {
 // ========================================================= preparação
 // Resolve tudo o que a Shopee exige antes de criar/editar: mídia, categoria,
 // limites, atributos, marca, GTIN, logística, tabela de medidas e prazo.
+// ctx.dryRun (prévia): nada é enviado — só endpoints de leitura — e os
+// problemas vão para ctx.issues em vez de interromper na primeira falha.
 async function prepare(ctx, p, prev, warnings) {
   const variants = p.variants || [];
   const meta = {};
+  const dry = !!ctx.dryRun;
+  const fail = (msg) => {
+    if (!dry) throw new PlatformError(`Shopee: ${msg}`);
+    ctx.issues.push(msg);
+  };
+  const attempt = async (fn, fallback) => {
+    if (!dry) return fn();
+    try {
+      return await fn();
+    } catch (e) {
+      if (!(e instanceof PlatformError) || e.retryable) throw e;
+      ctx.issues.push(e.message.replace(/^Shopee:\s*/, ''));
+      return fallback;
+    }
+  };
 
   // Fotos (máx. 10 MB, JPG/PNG). Cache por URL evita reenvio.
   const imageCache = { ...(prev.images || {}) };
-  const up = async (u) => (imageCache[u] ||= await uploadImage(ctx, u));
+  const up = dry ? async (u) => `(foto) ${u}` : async (u) => (imageCache[u] ||= await uploadImage(ctx, u));
   const imageIds = [];
   for (const u of p.images.slice(0, 9)) imageIds.push(await up(u));
   if (p.images.length > 9) warnings.push('Shopee aceita até 9 fotos; as excedentes foram ignoradas');
 
   // Categoria: produto → padrão do card → recomendação (título + capa).
-  const categoryId = Number(prev.category_id || p.categories.shopee || ctx.creds.default_category_id || await recommendCategory(ctx, p, imageIds[0]));
-  const limits = await itemLimit(ctx, categoryId);
+  const categoryId = Number(prev.category_id || p.categories.shopee || ctx.creds.default_category_id ||
+    await attempt(() => recommendCategory(ctx, p, dry ? undefined : imageIds[0]), 0)) || null;
+  const limits = categoryId ? await itemLimit(ctx, categoryId) : {};
 
   // Limites da categoria.
   const nameLim = limits.item_name_length_limit || {};
   const itemName = p.title.slice(0, nameLim.max_limit || 120);
-  if (nameLim.min_limit && itemName.length < nameLim.min_limit) throw new PlatformError(`Shopee: título precisa de ao menos ${nameLim.min_limit} caracteres`);
+  if (itemName.length < p.title.length) warnings.push(`Título cortado em ${itemName.length} caracteres (limite da Shopee)`);
+  if (nameLim.min_limit && itemName.length < nameLim.min_limit) fail(`título precisa de ao menos ${nameLim.min_limit} caracteres`);
   const descLim = limits.item_description_length_limit || {};
   const description = plain(p.description || p.title).slice(0, descLim.max_limit || 3000);
-  if (descLim.min_limit && description.length < descLim.min_limit) throw new PlatformError(`Shopee: descrição precisa de ao menos ${descLim.min_limit} caracteres (tem ${description.length})`);
+  if (descLim.min_limit && description.length < descLim.min_limit) fail(`descrição precisa de ao menos ${descLim.min_limit} caracteres (tem ${description.length})`);
   const imgLim = limits.item_image_count_limit || {};
-  if (imgLim.min_limit && imageIds.length < imgLim.min_limit) throw new PlatformError(`Shopee: a categoria exige ao menos ${imgLim.min_limit} fotos`);
+  if (imgLim.min_limit && imageIds.length < imgLim.min_limit) fail(`a categoria exige ao menos ${imgLim.min_limit} fotos`);
   const priceLim = limits.price_limit || {};
   for (const v of variants.length ? variants : [p]) {
     if ((priceLim.min_limit && v.price < priceLim.min_limit) || (priceLim.max_limit && v.price > priceLim.max_limit)) {
-      throw new PlatformError(`Shopee: preço ${v.price} fora da faixa permitida [${priceLim.min_limit}, ${priceLim.max_limit}]${v.sku !== p.sku ? ` (variação ${v.sku})` : ''}`);
+      fail(`preço ${v.price} fora da faixa permitida [${priceLim.min_limit}, ${priceLim.max_limit}]${v.sku !== p.sku ? ` (variação ${v.sku})` : ''}`);
     }
   }
   const stockMax = (limits.stock_limit || {}).max_limit || Infinity;
@@ -335,7 +357,7 @@ async function prepare(ctx, p, prev, warnings) {
   if (!p.weightKg) warnings.push(`Produto sem peso: usado o peso padrão de ${weight} kg (afeta o frete)`);
   const hasDims = !!(p.lengthCm && p.widthCm && p.heightCm);
   if (!hasDims && (limits.dimension_limit || {}).dimension_mandatory) {
-    throw new PlatformError('Shopee: a categoria exige dimensões do pacote (lengthCm, widthCm, heightCm)');
+    fail('a categoria exige dimensões do pacote (lengthCm, widthCm, heightCm)');
   }
 
   const content = {
@@ -345,16 +367,16 @@ async function prepare(ctx, p, prev, warnings) {
     image: { image_id_list: imageIds },
     condition: p.condition === 'used' ? 'USED' : 'NEW', // obrigatório no BR desde 09/2026
     item_sku: p.sku,
-    attribute_list: await mapAttributes(ctx, categoryId, p),
-    brand: await resolveBrand(ctx, categoryId, p.brand, warnings),
+    attribute_list: categoryId ? await attempt(() => mapAttributes(ctx, categoryId, p), []) : [],
+    brand: categoryId ? await resolveBrand(ctx, categoryId, p.brand, warnings) : { brand_id: 0, original_brand_name: 'NoBrand' },
   };
   if (hasDims) content.dimension = { package_length: Math.ceil(p.lengthCm), package_width: Math.ceil(p.widthCm), package_height: Math.ceil(p.heightCm) };
   if (p.tax) content.tax_info = p.tax;
-  const preOrder = daysToShip(p, limits, warnings);
+  const preOrder = await attempt(() => daysToShip(p, limits, warnings), null);
   if (preOrder) content.pre_order = preOrder;
 
   // Tabela de medidas (roupas, calçados...).
-  const sizeChart = await resolveSizeChart(ctx, p, limits, prev, warnings);
+  const sizeChart = await attempt(() => resolveSizeChart(ctx, p, limits, prev, warnings), {});
   if (sizeChart.info) content.size_chart_info = sizeChart.info;
   if (sizeChart.meta) meta.size_chart = sizeChart.meta;
 
@@ -365,19 +387,19 @@ async function prepare(ctx, p, prev, warnings) {
 
   // GTIN conforme a regra da categoria (Mandatory / Flexible / Optional).
   const rule = String(((limits.gtin_limit || {}).gtin_validation_rule) || 'Optional').toLowerCase();
-  const gtinFor = (code, label) => gtinValue(code, rule, label);
-  const gtin = variants.length ? null : gtinFor(p.gtin, 'produto');
+  const gtinFor = (code, label) => attempt(() => gtinValue(code, rule, label), null);
+  const gtin = variants.length ? null : await gtinFor(p.gtin, 'produto');
 
-  const logistics = await resolveLogistics(ctx, p, weight, hasDims, warnings);
+  const logistics = await attempt(() => resolveLogistics(ctx, p, weight, hasDims, warnings), []);
 
   // Variações (validação + estrutura), com imagens do 1º nível.
   let tiers = null;
   if (variants.length) {
-    tiers = await buildTiers(ctx, p, categoryId, limits, up, warnings);
-    tiers.models.forEach((m) => {
+    tiers = await attempt(() => buildTiers(ctx, p, categoryId, limits, up, warnings), null);
+    for (const m of tiers ? tiers.models : []) {
       m.stock = clampStock(m.variant.stock);
-      m.gtin = gtinFor(m.variant.gtin, `variação ${m.variant.sku}`);
-    });
+      m.gtin = await gtinFor(m.variant.gtin, `variação ${m.variant.sku}`);
+    }
   }
   meta.images = imageCache;
 
@@ -389,6 +411,8 @@ async function prepare(ctx, p, prev, warnings) {
     logisticsHash: sha256(JSON.stringify(logistics)),
     structureKey: tiers ? tiers.structureKey : null,
     videoPending: !!video.pending,
+    videoNote: video.note || null,
+    rule,
   };
 }
 
@@ -634,7 +658,7 @@ async function resolveSizeChart(ctx, p, limits, prev, warnings) {
   }
   if (p.sizeChart && lim.support_image_size_chart !== false) {
     const prevChart = prev.size_chart && prev.size_chart.url === p.sizeChart ? prev.size_chart : null;
-    const id = prevChart ? prevChart.id : await uploadImage(ctx, p.sizeChart, 'desc');
+    const id = prevChart ? prevChart.id : ctx.dryRun ? `(imagem) ${p.sizeChart}` : await uploadImage(ctx, p.sizeChart, 'desc');
     return { info: { size_chart: id }, meta: { url: p.sizeChart, id } };
   }
   if (lim.size_chart_mandatory) {
@@ -651,6 +675,7 @@ async function resolveVideo(ctx, p, prev, warnings) {
     if (p.videos.length) warnings.push('Shopee aceita só vídeo MP4 (até 30 MB, 10 a 60 s); vídeo não enviado');
     return { meta: prev.video ? null : undefined };
   }
+  if (ctx.dryRun) return { note: `${want} — enviado em partes (MP4 até 30 MB, 10 a 60 s; a Shopee valida duração e resolução)` };
   const old = prev.video && prev.video.url === want ? prev.video : null;
   if (old && !old.pending) return { id: old.id, ready: true, meta: old };
   try {
@@ -901,17 +926,10 @@ async function syncDiscount(ctx, itemId, p, prev, meta, warnings) {
       return { promo: { ...old, key, model_ids: modelList.map((m) => m.model_id) } };
     }
     if (old) await remove(old);
-    // Início ≥ 1 h no futuro (margem de 5 min); fim ≥ 1 h depois; < 180 dias.
-    const minStart = now + 3600 + 300;
-    const wanted = p.promoStart ? Math.floor(new Date(p.promoStart) / 1000) : 0;
-    const start = Math.max(wanted, minStart);
-    if (wanted && wanted < minStart) warnings.push('A Shopee exige que o desconto comece ao menos 1 hora no futuro: início ajustado');
-    let end = p.promoEnd ? Math.floor(new Date(p.promoEnd) / 1000) : start + 30 * 86400;
-    if (end < start + 3600) throw new PlatformError('o fim do desconto precisa ser ao menos 1 hora depois do início');
-    if (end - start >= 180 * 86400) {
-      end = start + 179 * 86400;
-      warnings.push('A Shopee limita o desconto a menos de 180 dias: fim ajustado');
-    }
+    const win = discountWindow(p);
+    warnings.push(...win.warnings);
+    if (win.error) throw new PlatformError(win.error);
+    const { start, end } = win;
     const d = await call(ctx, 'POST', '/api/v2/discount/add_discount', {
       body: { discount_name: `AzureHub ${p.sku}`.slice(0, 50), start_time: start, end_time: end },
     });
@@ -930,6 +948,134 @@ async function syncDiscount(ctx, itemId, p, prev, meta, warnings) {
   }
 }
 
+// Início ≥ 1 h no futuro (margem de 5 min); fim ≥ 1 h depois; < 180 dias.
+function discountWindow(p, now = Math.floor(Date.now() / 1000)) {
+  const warnings = [];
+  const minStart = now + 3600 + 300;
+  const wanted = p.promoStart ? Math.floor(new Date(p.promoStart) / 1000) : 0;
+  const start = Math.max(wanted, minStart);
+  if (wanted && wanted < minStart) warnings.push('A Shopee exige que o desconto comece ao menos 1 hora no futuro: início ajustado');
+  let end = p.promoEnd ? Math.floor(new Date(p.promoEnd) / 1000) : start + 30 * 86400;
+  if (end < start + 3600) return { start, end, warnings, error: 'o fim do desconto precisa ser ao menos 1 hora depois do início' };
+  if (end - start >= 180 * 86400) {
+    end = start + 179 * 86400;
+    warnings.push('A Shopee limita o desconto a menos de 180 dias: fim ajustado');
+  }
+  return { start, end, warnings, error: null };
+}
+
+// =============================================================== prévia
+// Mostra como o produto vai subir. Conectado: roda a mesma preparação do
+// envio em modo simulação (só endpoints de leitura). Sem conexão: regras
+// fixas da Shopee, sem consultar categoria/atributos.
+async function preview(ctx, p) {
+  const errors = [];
+  const warnings = [];
+  const variants = p.variants || [];
+  const hasPromo = variants.length ? variants.some((v) => v.promoPrice) : !!p.promoPrice;
+  const promoValue = variants.length ? [...new Set(variants.filter((v) => v.promoPrice).map((v) => H_.money(v.promoPrice)))].join(' / ') : H_.money(p.promoPrice);
+  let promoText = 'Sem promoção';
+  if (hasPromo) {
+    const win = discountWindow(p);
+    warnings.push(...win.warnings);
+    if (win.error) errors.push(`Desconto: ${win.error}`);
+    promoText = `${promoValue} · ${H_.when(win.start)} → ${H_.when(win.end)}`;
+  }
+  const videoMp4 = p.videos.find((v) => /\.mp4($|\?)/i.test(v));
+
+  if (!ctx) {
+    errors.push(...structuralChecks(p, 'BR'));
+    if (p.title.length > 120) warnings.push('Título será cortado em 120 caracteres');
+    if (p.images.length > 9) warnings.push('Shopee aceita até 9 fotos; as excedentes serão ignoradas');
+    if (p.videos.length && !videoMp4) warnings.push('Shopee aceita só vídeo MP4');
+    if (!p.weightKg) warnings.push('Produto sem peso: será usado o peso padrão do card');
+    if (p.gtin && !H_.validGtin(p.gtin)) warnings.push(`GTIN "${p.gtin}" com dígito verificador inválido`);
+    warnings.push('Conta Shopee não conectada: categoria, atributos obrigatórios, marca, GTIN e frete serão validados no envio');
+    return {
+      online: false, errors, warnings,
+      fields: [
+        H_.field('Título', p.title.slice(0, 120)),
+        H_.field('Categoria', p.categories.shopee || 'recomendada pela Shopee no envio'),
+        H_.field('Marca', p.brand || 'Sem marca'),
+        H_.field('Condição', p.condition === 'used' ? 'Usado' : 'Novo'),
+        H_.field('Preço', H_.priceRange(p)),
+        H_.field('Promoção', promoText),
+        H_.field('Estoque', p.active ? p.stock : '0 — inativo: anúncio deslistado'),
+        H_.field('Peso / medidas', `${p.weightKg || '—'} kg · ${p.lengthCm && p.widthCm && p.heightCm ? `${p.lengthCm}×${p.widthCm}×${p.heightCm} cm` : 'sem dimensões'}`),
+        H_.field('Fotos', `${Math.min(9, p.images.length)} de ${p.images.length}`),
+        H_.field('Vídeo', videoMp4 || 'Sem vídeo'),
+        H_.field('Descrição', H_.excerpt(plain(p.description || p.title)), 'enviada como texto, sem HTML'),
+      ],
+      variants: variants.length ? H_.variantRows(p) : null,
+    };
+  }
+
+  const dctx = { ...ctx, dryRun: true, issues: errors };
+  const prep = await prepare(dctx, p, {}, warnings);
+  const c = prep.content;
+  const tree = prep.categoryId ? await attributeTree(ctx, prep.categoryId) : [];
+  const defs = new Map();
+  const walk = (list) => list.forEach((d) => {
+    defs.set(d.attribute_id, d);
+    (d.attribute_value_list || []).forEach((v) => walk(v.child_attribute_list || []));
+  });
+  walk(tree);
+  const attrText = c.attribute_list.map((a) => {
+    const d = defs.get(a.attribute_id) || { name: a.attribute_id, attribute_value_list: [] };
+    const isDate = (d.attribute_info || {}).input_validation_type === 4;
+    const vals = a.attribute_value_list.map((v) => (v.value_id
+      ? ((d.attribute_value_list || []).find((x) => x.value_id === v.value_id) || {}).name || v.value_id
+      : isDate ? new Date(Number(v.original_value_name) * 1000).toLocaleDateString('pt-BR', { timeZone: 'UTC' })
+        : `${v.original_value_name}${v.value_unit ? ` ${v.value_unit}` : ''}`));
+    return `${d.name}: ${vals.join(', ')}`;
+  }).join('; ');
+  const channels = await cached(`chan:${ctx.tokens.shop_id}`, H, async () => (await call(ctx, 'GET', '/api/v2/logistics/get_channel_list')).logistics_channel_list || []);
+  const channelNames = prep.logistics.map((l) => (channels.find((ch) => Number(ch.logistics_channel_id) === l.logistic_id) || {}).logistics_channel_name || l.logistic_id);
+  const sc = c.size_chart_info;
+  const structure = prep.tiers && prep.tiers.structure;
+  return {
+    online: true, errors, warnings,
+    fields: [
+      H_.field('Título', c.item_name),
+      H_.field('Categoria', prep.categoryId, p.categories.shopee || ctx.creds.default_category_id ? null : 'recomendada pela Shopee'),
+      H_.field('Marca', c.brand.brand_id ? `${c.brand.original_brand_name} (id ${c.brand.brand_id})` : 'Sem marca'),
+      H_.field('Condição', c.condition === 'USED' ? 'Usado' : 'Novo'),
+      H_.field('Preço', H_.priceRange(p)),
+      H_.field('Promoção', promoText),
+      H_.field('Estoque', p.active ? (prep.tiers ? prep.tiers.models.reduce((n, m) => n + m.stock, 0) : prep.stock) : '0 — inativo: anúncio deslistado'),
+      H_.field('Peso / medidas', `${c.weight} kg · ${c.dimension ? `${c.dimension.package_length}×${c.dimension.package_width}×${c.dimension.package_height} cm` : 'sem dimensões'}`),
+      H_.field('Fotos', `${c.image.image_id_list.length} de ${p.images.length}`),
+      H_.field('Vídeo', prep.videoNote || 'Sem vídeo'),
+      H_.field('Descrição', H_.excerpt(c.description), `${c.description.length} caracteres, texto sem HTML`),
+      H_.field('Atributos', attrText || 'nenhum'),
+      H_.field('GTIN', variants.length ? 'por variação' : (prep.gtin || 'não enviado'), `regra da categoria: ${prep.rule}`),
+      H_.field('Prazo de postagem', c.pre_order ? `${c.pre_order.days_to_ship} dias (pré-venda)` : 'padrão da categoria'),
+      H_.field('Tabela de medidas', sc ? (sc.size_chart_id ? `modelo ${sc.size_chart_id}` : 'imagem') : '—'),
+      H_.field('Frete', channelNames.join(', ') || 'nenhum canal'),
+      H_.field('Fiscal', c.tax_info ? Object.entries(c.tax_info).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(' · ') : '—'),
+    ],
+    variants: prep.tiers ? prep.tiers.models.map((m) => ({
+      sku: m.variant.sku, options: H_.optionsLabel(m.variant.options), price: H_.money(m.variant.price),
+      promoPrice: m.variant.promoPrice ? H_.money(m.variant.promoPrice) : '—', stock: p.active ? m.stock : 0, gtin: m.gtin || '—',
+    })) : (variants.length ? H_.variantRows(p) : null),
+    variantStructure: structure ? (structure.standardise_tier_variation ? 'padronizada da Shopee' : 'livre (tier_variation)') : null,
+  };
+}
+
+// Regras de variação que não dependem da conta (usadas na prévia offline).
+function structuralChecks(p, reg) {
+  const out = [];
+  const variants = p.variants || [];
+  if (!variants.length) return out;
+  const keys = Object.keys(variants[0].options);
+  if (keys.length > MAX_TIERS) out.push(`Shopee aceita no máximo ${MAX_TIERS} níveis de variação (${keys.join(', ')})`);
+  if (variants.length > MAX_MODELS) out.push(`Shopee aceita no máximo ${MAX_MODELS} variações (${variants.length})`);
+  const prices = variants.map((v) => v.price);
+  const ratio = PRICE_RATIO[reg] || 5;
+  if (Math.max(...prices) > Math.min(...prices) * ratio) out.push(`a variação mais cara não pode passar de ${ratio}× a mais barata`);
+  return out;
+}
+
 // ------------------------------------------------------------------ apoio
 // BR/SG/MY/MX/PL aceitam 2 casas decimais.
 const price = (v) => Math.round(Number(v) * 100) / 100;
@@ -939,4 +1085,4 @@ function plain(html) {
     .replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-module.exports._internal = { sign, url, timing, cache, validGtin, gtinValue, customValue, parseDate, sameVariation };
+module.exports._internal = { sign, url, timing, cache, validGtin, gtinValue, customValue, parseDate, sameVariation, discountWindow };

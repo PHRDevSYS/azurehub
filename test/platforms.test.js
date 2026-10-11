@@ -1,5 +1,10 @@
 'use strict';
 // Fonte de dados do site (SQLite) e normalização de variações.
+const fsx = require('node:fs');
+const osx = require('node:os');
+const pathx = require('node:path');
+
+process.env.HUB_DATA_DIR = fsx.mkdtempSync(pathx.join(osx.tmpdir(), 'azurehub-plat-'));
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -16,14 +21,14 @@ test('fonte SQLite: consulta o banco do site e normaliza', async () => {
            INSERT INTO produtos VALUES ('X1', 'Mesa', '350,00', 2, 'https://site.test/m1.jpg;https://site.test/m2.jpg');`);
   db.close();
   const res = await source.testSource({
-    type: 'sqlite', database: file,
+    type: 'database', engine: 'sqlite', database: file,
     query: 'SELECT codigo AS sku, nome AS title, preco AS price, estoque AS stock, imagens AS images FROM produtos',
   });
   assert.equal(res.count, 1);
   assert.equal(res.sample[0].product.price, 350);
   assert.equal(res.sample[0].product.images.length, 2);
   assert.deepEqual(res.sample[0].errors, []);
-  await assert.rejects(source.testSource({ type: 'sqlite', database: file, query: 'DELETE FROM produtos' }), /SELECT/);
+  await assert.rejects(source.testSource({ type: 'database', engine: 'sqlite', database: file, query: 'DELETE FROM produtos' }), /SELECT/);
 });
 
 test('linhas com parent_sku viram um produto com variações', () => {

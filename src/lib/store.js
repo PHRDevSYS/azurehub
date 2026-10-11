@@ -77,7 +77,18 @@ function open(file = config.dbFile) {
   db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  migrate();
   return db;
+}
+
+// Colunas adicionadas depois da primeira versão (bancos já instalados).
+function migrate() {
+  const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+  if (!cols('products').includes('captured_at')) {
+    db.exec('ALTER TABLE products ADD COLUMN captured_at TEXT');
+    db.exec('UPDATE products SET captured_at = updated_at WHERE captured_at IS NULL');
+  }
+  if (!cols('listings').includes('selected_at')) db.exec('ALTER TABLE listings ADD COLUMN selected_at TEXT');
 }
 
 function close() {
@@ -143,38 +154,85 @@ function isEnabled(platform) {
 function upsertProduct(product, hash, origin) {
   const prev = get('SELECT hash FROM products WHERE sku = ?', product.sku);
   if (prev && prev.hash === hash) return false;
-  run(`INSERT INTO products(sku, data, hash, origin, updated_at) VALUES(?, ?, ?, ?, ?)
+  const t = now();
+  run(`INSERT INTO products(sku, data, hash, origin, updated_at, captured_at) VALUES(?, ?, ?, ?, ?, ?)
        ON CONFLICT(sku) DO UPDATE SET data = excluded.data, hash = excluded.hash,
        origin = excluded.origin, updated_at = excluded.updated_at`,
-    product.sku, JSON.stringify(product), hash, origin, now());
+    product.sku, JSON.stringify(product), hash, origin, t, t);
   return true;
 }
 function getProduct(sku) {
   const row = get('SELECT * FROM products WHERE sku = ?', sku);
   return row ? { ...row, data: JSON.parse(row.data) } : null;
 }
-function listProducts({ limit = 50, offset = 0, search = '' } = {}) {
-  const like = `%${search}%`;
-  const rows = all(`SELECT sku, data, origin, updated_at FROM products
-    WHERE sku LIKE ? OR json_extract(data, '$.title') LIKE ?
-    ORDER BY updated_at DESC LIMIT ? OFFSET ?`, like, like, limit, offset);
-  const total = get(`SELECT COUNT(*) AS n FROM products
-    WHERE sku LIKE ? OR json_extract(data, '$.title') LIKE ?`, like, like).n;
-  const listings = all('SELECT * FROM listings');
+function listingsBySku(skus) {
   const bySku = {};
-  for (const l of listings) (bySku[l.sku] ||= {})[l.platform] = l;
+  if (!skus.length) return bySku;
+  const rows = all(`SELECT platform, sku, external_id, status, last_error, last_sync, last_hash, selected_at FROM listings
+    WHERE sku IN (${skus.map(() => '?').join(',')})`, ...skus);
+  for (const l of rows) (bySku[l.sku] ||= {})[l.platform] = l;
+  return bySku;
+}
+
+// Grade da tela Produtos (sem mídia). filter: all | not_sent | sent | error
+function listProducts({ limit = 50, offset = 0, search = '', filter = 'all' } = {}) {
+  const like = `%${search}%`;
+  const where = [`(sku LIKE ? OR json_extract(data, '$.title') LIKE ? OR json_extract(data, '$.brand') LIKE ?)`];
+  const args = [like, like, like];
+  if (filter === 'not_sent') where.push('sku NOT IN (SELECT sku FROM listings)');
+  if (filter === 'sent') where.push('sku IN (SELECT sku FROM listings)');
+  if (filter === 'error') where.push(`sku IN (SELECT sku FROM listings WHERE status = 'error')`);
+  const w = where.join(' AND ');
+  const rows = all(`SELECT sku, data, hash, origin, updated_at, captured_at FROM products WHERE ${w}
+    ORDER BY updated_at DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
+  const total = get(`SELECT COUNT(*) AS n FROM products WHERE ${w}`, ...args).n;
+  const bySku = listingsBySku(rows.map((r) => r.sku));
   return {
     total,
     items: rows.map((r) => {
       const d = JSON.parse(r.data);
+      const listings = bySku[r.sku] || {};
+      for (const l of Object.values(listings)) l.outdated = l.last_hash !== r.hash;
       return {
-        sku: r.sku, title: d.title, price: d.price, promoPrice: d.promoPrice, stock: d.stock,
-        image: d.images[0] || null, origin: r.origin, updatedAt: r.updated_at,
-        listings: bySku[r.sku] || {},
+        sku: r.sku, title: d.title, brand: d.brand, price: d.price, promoPrice: d.promoPrice, stock: d.stock,
+        variants: (d.variants || []).length, images: d.images.length, videos: d.videos.length, active: d.active,
+        origin: r.origin, sourceRef: d.sourceRef || null, capturedAt: r.captured_at, updatedAt: r.updated_at, listings,
       };
     }),
   };
 }
+
+// Grade da tela Sincronização: uma linha por produto × destino selecionado.
+function listSync({ limit = 100, offset = 0, search = '', platform = '', status = '' } = {}) {
+  const like = `%${search}%`;
+  const where = [`(l.sku LIKE ? OR json_extract(p.data, '$.title') LIKE ? OR IFNULL(l.external_id, '') LIKE ?)`];
+  const args = [like, like, like];
+  if (platform) { where.push('l.platform = ?'); args.push(platform); }
+  // Desatualizado = já publicado, mas o produto mudou na origem desde o último envio.
+  if (status === 'outdated') where.push(`l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != p.hash)`);
+  else if (status) { where.push('l.status = ?'); args.push(status); }
+  const w = where.join(' AND ');
+  const rows = all(`SELECT l.*, p.data, p.hash, p.updated_at AS product_updated_at,
+      (SELECT j.status || '|' || j.run_after FROM jobs j WHERE j.platform = l.platform AND j.sku = l.sku AND j.status IN ('queued','running') ORDER BY j.id DESC LIMIT 1) AS job
+    FROM listings l JOIN products p ON p.sku = l.sku WHERE ${w}
+    ORDER BY COALESCE(l.last_sync, l.selected_at, p.updated_at) DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
+  const total = get(`SELECT COUNT(*) AS n FROM listings l JOIN products p ON p.sku = l.sku WHERE ${w}`, ...args).n;
+  return {
+    total,
+    items: rows.map((r) => {
+      const d = JSON.parse(r.data);
+      const meta = r.meta ? JSON.parse(r.meta) : {};
+      const [jobStatus, runAfter] = r.job ? r.job.split('|') : [null, null];
+      return {
+        platform: r.platform, sku: r.sku, title: d.title, price: d.price, promoPrice: d.promoPrice, stock: d.stock,
+        variants: (d.variants || []).length, status: r.status, externalId: r.external_id, permalink: meta.permalink || null,
+        lastSync: r.last_sync, selectedAt: r.selected_at, productUpdatedAt: r.product_updated_at,
+        outdated: r.status === 'synced' && r.last_hash !== r.hash, message: r.last_error, job: jobStatus, jobRunAfter: runAfter,
+      };
+    }),
+  };
+}
+
 function deleteProduct(sku) {
   run('DELETE FROM products WHERE sku = ?', sku);
 }
@@ -195,9 +253,42 @@ function saveListing(platform, sku, fields) {
     platform, sku, merged.external_id ?? null, merged.status || 'pending', merged.last_hash ?? null,
     JSON.stringify(merged.meta), merged.last_error ?? null, merged.last_sync ?? null);
 }
+// Marca o produto para sincronizar com o destino (cria o vínculo 'pending').
+function selectForPlatform(platform, sku) {
+  const cur = getListing(platform, sku);
+  if (cur) {
+    if (cur.status === 'paused') run(`UPDATE listings SET status = CASE WHEN external_id IS NULL THEN 'pending' ELSE 'synced' END, last_hash = NULL WHERE platform = ? AND sku = ?`, platform, sku);
+    return false;
+  }
+  run(`INSERT INTO listings(platform, sku, status, meta, selected_at) VALUES(?, ?, 'pending', '{}', ?)`, platform, sku, now());
+  return true;
+}
+
+// Parar de sincronizar: sem anúncio criado, o vínculo some; com anúncio, fica pausado.
+function unselect(platform, sku) {
+  const cur = getListing(platform, sku);
+  if (!cur) return;
+  if (!cur.external_id) run('DELETE FROM listings WHERE platform = ? AND sku = ?', platform, sku);
+  else run(`UPDATE listings SET status = 'paused' WHERE platform = ? AND sku = ?`, platform, sku);
+  run(`DELETE FROM jobs WHERE platform = ? AND sku = ? AND status = 'queued'`, platform, sku);
+}
+
+// Contadores da tela Sincronização.
+function syncCounts() {
+  const out = { total: 0, pending: 0, synced: 0, error: 0, skipped: 0, paused: 0, outdated: 0 };
+  for (const r of all('SELECT status, COUNT(*) AS n FROM listings GROUP BY status')) { out[r.status] = r.n; out.total += r.n; }
+  out.outdated = get(`SELECT COUNT(*) AS n FROM listings l JOIN products p ON p.sku = l.sku
+    WHERE l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != p.hash)`).n;
+  return out;
+}
+
+function selectedSkus(platform) {
+  return all(`SELECT sku FROM listings WHERE platform = ? AND status != 'paused'`, platform).map((r) => r.sku);
+}
+
 function listingStats(platform) {
   const rows = all('SELECT status, COUNT(*) AS n FROM listings WHERE platform = ? GROUP BY status', platform);
-  const out = { synced: 0, error: 0, pending: 0, skipped: 0 };
+  const out = { synced: 0, error: 0, pending: 0, skipped: 0, paused: 0 };
   for (const r of rows) out[r.status] = r.n;
   return out;
 }
@@ -238,10 +329,16 @@ function log(level, message, { platform = null, sku = null } = {}) {
   const line = `[${level}]${platform ? ` [${platform}]` : ''}${sku ? ` [${sku}]` : ''} ${message}`;
   (level === 'error' ? console.error : console.log)(line);
 }
-function listLogs({ limit = 200, platform = null } = {}) {
-  return platform
-    ? all('SELECT * FROM logs WHERE platform = ? ORDER BY id DESC LIMIT ?', platform, limit)
-    : all('SELECT * FROM logs ORDER BY id DESC LIMIT ?', limit);
+function listLogs({ limit = 200, platform = null, sku = null } = {}) {
+  const where = [];
+  const args = [];
+  if (platform) { where.push('platform = ?'); args.push(platform); }
+  if (sku) { where.push('sku = ?'); args.push(sku); }
+  return all(`SELECT * FROM logs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`, ...args, limit);
+}
+
+function jobsFor(sku) {
+  return all(`SELECT * FROM jobs WHERE sku = ? ORDER BY id DESC LIMIT 20`, sku);
 }
 
 // ---------- sessões / OAuth ----------
@@ -272,9 +369,9 @@ module.exports = {
   open, close, now,
   getSetting, setSetting, getSecretSetting, setSecretSetting,
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
-  upsertProduct, getProduct, listProducts, deleteProduct,
-  getListing, saveListing, listingStats,
+  upsertProduct, getProduct, listProducts, listSync, deleteProduct,
+  getListing, saveListing, listingStats, selectForPlatform, unselect, selectedSkus, syncCounts,
   enqueue, finishJob, resetStuckJobs, listJobs, jobStats, clearFinishedJobs,
-  log, listLogs,
+  log, listLogs, jobsFor,
   createSession, sessionValid, deleteSession, saveOAuthState, consumeOAuthState,
 };

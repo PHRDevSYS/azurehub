@@ -3,6 +3,7 @@
 // OAuth 2.0 (authorization code). Access token dura 6 h; refresh token é de
 // uso único (cada refresh devolve um novo — por isso sempre regravamos).
 const { requestJson, PlatformError, youtubeId } = require('../lib/media');
+const H_ = require('./preview-helpers');
 
 const API = 'https://api.mercadolibre.com';
 const AUTH_HOSTS = {
@@ -147,7 +148,72 @@ module.exports = {
     }
     return { externalId: itemId, meta, warnings };
   },
+
+  preview: (ctx, p) => preview(ctx, p),
 };
+
+// =============================================================== prévia
+// Regras do anúncio + (conectado) categoria prevista e atributos obrigatórios
+// da categoria, só com endpoints de leitura.
+async function preview(ctx, p) {
+  const errors = [];
+  const warnings = [];
+  if ((p.variants || []).length) errors.push('produtos com variações ainda não são publicados por este conector');
+  if (p.title.length > 60) warnings.push(`Título será cortado em 60 caracteres: "${p.title.slice(0, 60)}"`);
+  if (p.images.length > 10) warnings.push('Mercado Livre aceita até 10 fotos; as excedentes serão ignoradas');
+  const yt = p.videos.map(youtubeId).find(Boolean);
+  if (p.videos.length && !yt) warnings.push('Só vídeos do YouTube são enviados ao Mercado Livre');
+  if (p.gtin && !H_.validGtin(p.gtin)) warnings.push(`GTIN "${p.gtin}" com dígito verificador inválido`);
+  const sent = ['SELLER_SKU', p.brand ? 'BRAND' : null, p.model ? 'MODEL' : null, p.gtin ? 'GTIN' : 'EMPTY_GTIN_REASON',
+    ...Object.keys(p.attributes || {}).filter((k) => /^[A-Z0-9_]+$/.test(k))].filter(Boolean);
+  let promoText = 'Sem promoção';
+  if (p.promoPrice) {
+    const start = p.promoStart && new Date(p.promoStart) > new Date() ? new Date(p.promoStart) : new Date(Date.now() + 5 * 60e3);
+    const end = p.promoEnd ? new Date(p.promoEnd) : new Date(start.getTime() + 30 * 86400e3);
+    promoText = `${H_.money(p.promoPrice)} · ${H_.when(start / 1000)} → ${H_.when(end / 1000)} (campanha do vendedor)`;
+  }
+  let category = p.categories.mercadolivre || (ctx && ctx.creds.default_category_id) || null;
+  let categoryNote = null;
+  if (ctx) {
+    try {
+      if (!category) {
+        category = await predictCategory(ctx, p.title);
+        categoryNote = 'prevista pelo título';
+      }
+      const info = await api(ctx, 'GET', `/categories/${category}`);
+      categoryNote = [info.name, categoryNote].filter(Boolean).join(' — ');
+      const attrs = await api(ctx, 'GET', `/categories/${category}/attributes`);
+      const missing = (attrs || []).filter((a) => a.tags && a.tags.required && !sent.includes(a.id) && a.id !== 'GTIN');
+      for (const a of missing) {
+        const opts = (a.values || []).slice(0, 5).map((v) => v.name).join(' / ');
+        errors.push(`a categoria exige o atributo "${a.name}" (id ${a.id}${opts ? `: ${opts}` : ''}) — envie em "attributes" com a chave ${a.id}`);
+      }
+    } catch (e) {
+      if (!(e instanceof PlatformError) || e.retryable) throw e;
+      errors.push(e.message);
+    }
+  } else {
+    warnings.push('Conta Mercado Livre não conectada: categoria e atributos obrigatórios serão validados no envio');
+  }
+  return {
+    online: !!ctx, errors, warnings,
+    fields: [
+      H_.field('Título', p.title.slice(0, 60)),
+      H_.field('Categoria', category || 'prevista pelo título no envio', categoryNote),
+      H_.field('Tipo de anúncio', ctx ? ctx.creds.listing_type_id || 'gold_special' : 'conforme o card', 'gold_special = Clássico, gold_pro = Premium'),
+      H_.field('Condição', p.condition === 'used' ? 'Usado' : 'Novo'),
+      H_.field('Preço', H_.money(p.price)),
+      H_.field('Promoção', promoText),
+      H_.field('Estoque', p.active ? p.stock : '0 — inativo: anúncio pausado'),
+      H_.field('Fotos', `${Math.min(10, p.images.length)} de ${p.images.length}`, 'o Mercado Livre baixa as fotos pela URL'),
+      H_.field('Vídeo', yt ? `YouTube ${yt}` : 'Sem vídeo'),
+      H_.field('Descrição', H_.excerpt(plainText(p.description || '')), 'texto puro (sem HTML)'),
+      H_.field('Atributos enviados', sent.join(', ')),
+      H_.field('Envio', `${ctx ? ctx.creds.shipping_mode || 'me2' : 'me2'}${p.lengthCm && p.widthCm && p.heightCm && p.weightKg ? ` · ${Math.ceil(p.heightCm)}x${Math.ceil(p.widthCm)}x${Math.ceil(p.lengthCm)} cm, ${Math.ceil(p.weightKg * 1000)} g` : ' · sem dimensões'}`),
+    ],
+    variants: (p.variants || []).length ? H_.variantRows(p) : null,
+  };
+}
 
 async function tokenRequest(params) {
   const data = await requestJson(`${API}/oauth/token`, {

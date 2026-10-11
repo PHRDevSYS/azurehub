@@ -18,6 +18,7 @@
 //   Partner / TAP) e não se aplica à publicação de produtos do vendedor.
 const { requestJson, download, PlatformError } = require('../lib/media');
 const { hmacHex, sha256 } = require('../lib/crypto');
+const H_ = require('./preview-helpers');
 
 const API = 'https://open-api.tiktokglobalshop.com';
 const AUTH = 'https://auth.tiktok-shops.com';
@@ -112,6 +113,8 @@ module.exports = {
     const productId = listing && listing.external_id;
     return productId ? update(ctx, p, listing) : create(ctx, p);
   },
+
+  preview: (ctx, p) => preview(ctx, p),
 };
 
 // ---------------------------------------------------------------- criação
@@ -399,10 +402,9 @@ async function syncPromotion(ctx, productId, p, prev, meta, warnings) {
         await call(ctx, 'DELETE', `/promotion/202309/activities/${old.activity_id}/products`, { body: { product_ids: [productId] } })
           .catch((e) => warnings.push(`Promoção anterior não removida: ${e.message}`));
       }
-      // Início precisa ser no futuro; fim, ao menos 10 min depois do início.
-      begin = Math.max(p.promoStart ? Math.floor(new Date(p.promoStart) / 1000) : 0, now + 120);
-      end = p.promoEnd ? Math.floor(new Date(p.promoEnd) / 1000) : begin + 30 * 86400;
-      if (end < begin + 600) throw new PlatformError('fim da promoção precisa ser ao menos 10 minutos depois do início');
+      const win = promotionWindow(p, now);
+      if (win.error) throw new PlatformError(win.error);
+      ({ begin, end } = win);
       const a = await call(ctx, 'POST', '/promotion/202309/activities', {
         body: {
           // O título precisa ser único entre todas as atividades da loja.
@@ -425,6 +427,86 @@ async function syncPromotion(ctx, productId, p, prev, meta, warnings) {
   } catch (e) {
     warnings.push(`Promoção não aplicada: ${e.message}`);
   }
+}
+
+// Início precisa ser no futuro; fim, ao menos 10 min depois do início.
+function promotionWindow(p, now = Math.floor(Date.now() / 1000)) {
+  const begin = Math.max(p.promoStart ? Math.floor(new Date(p.promoStart) / 1000) : 0, now + 120);
+  const end = p.promoEnd ? Math.floor(new Date(p.promoEnd) / 1000) : begin + 30 * 86400;
+  return { begin, end, error: end < begin + 600 ? 'fim da promoção precisa ser ao menos 10 minutos depois do início' : null };
+}
+
+// ---------------------------------------------------------------- prévia
+// Conectado: recomenda categoria, confere atributos obrigatórios e armazém
+// (endpoints de leitura). Fotos e vídeo não são enviados na prévia.
+const VIDEO_EXT = /\.(mp4|mov|mkv|wmv|webm|avi|3gp|flv|mpeg)($|\?)/i;
+
+async function preview(ctx, p) {
+  const errors = [];
+  const warnings = [];
+  const attempt = async (fn, fallback) => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!(e instanceof PlatformError) || e.retryable) throw e;
+      errors.push(e.message.replace(/^TikTok( Shop)?:\s*/, ''));
+      return fallback;
+    }
+  };
+  if ((p.variants || []).length) errors.push('produtos com variações ainda não são publicados por este conector');
+  const qty = stockQty(p);
+  if (!qty) warnings.push('Sem estoque ou inativo: a TikTok exige ao menos 1 unidade — o produto será criado quando houver estoque (ou desativado, se já existir)');
+  if (p.images.length > 9) warnings.push('TikTok aceita até 9 fotos principais; as excedentes serão ignoradas');
+  const video = p.videos[0] || null;
+  if (video && !VIDEO_EXT.test(video)) warnings.push('Vídeo em formato não aceito pela TikTok (MP4, MOV, MKV, WMV, WEBM, AVI, 3GP, FLV, MPEG)');
+  const identifier = identifierCode(p.gtin);
+  if (p.gtin && !identifier) warnings.push(`GTIN/EAN "${p.gtin}" com formato inválido (8, 12, 13 ou 14 dígitos): não será enviado`);
+  if (p.gtin && identifier && !H_.validGtin(p.gtin)) warnings.push(`GTIN "${p.gtin}" com dígito verificador inválido`);
+  let promoText = 'Sem promoção';
+  if (p.promoPrice) {
+    const win = promotionWindow(p);
+    if (win.error) errors.push(`Promoção: ${win.error}`);
+    promoText = `${H_.money(p.promoPrice)} · ${H_.when(win.begin)} → ${H_.when(win.end)} (campanha de preço fixo)`;
+  }
+
+  const media = { mainImages: p.images.slice(0, 9).map((u) => ({ uri: `(foto) ${u}` })), videoId: video ? '(vídeo)' : null };
+  let categoryId = p.categories.tiktok || (ctx && ctx.creds.default_category_id) || null;
+  let attributes = null;
+  let warehouse = ctx && ctx.creds.warehouse_id;
+  let attrText = null;
+  if (ctx) {
+    if (!categoryId) categoryId = await attempt(() => recommendCategory(ctx, p, []), null);
+    if (categoryId) {
+      attributes = await attempt(() => productAttributes(ctx, String(categoryId), p), null);
+      const defs = await categoryAttributes(ctx, String(categoryId));
+      attrText = (attributes || []).map((a) => {
+        const d = defs.find((x) => String(x.id) === a.id) || { name: a.id, values: [] };
+        return `${d.name}: ${a.values.map((v) => v.name || ((d.values || []).find((x) => String(x.id) === v.id) || {}).name || v.id).join(', ')}`;
+      }).join('; ');
+    }
+    if (!warehouse) warehouse = await attempt(() => defaultWarehouse(ctx), null);
+  } else {
+    warnings.push('Conta TikTok Shop não conectada: categoria, atributos obrigatórios e armazém serão validados no envio');
+  }
+  const content = contentFields(ctx || { tokens: {}, creds: {} }, p, media, attributes);
+  return {
+    online: !!ctx, errors, warnings,
+    fields: [
+      H_.field('Título', content.title),
+      H_.field('Categoria', categoryId || (ctx ? '—' : 'recomendada pela TikTok no envio'), ctx && !p.categories.tiktok && !ctx.creds.default_category_id && categoryId ? 'recomendada pela TikTok' : null),
+      H_.field('Preço', H_.money(p.price)),
+      H_.field('Promoção', promoText),
+      H_.field('Estoque', qty || '0 — não criado/desativado', warehouse ? `armazém ${warehouse}` : null),
+      H_.field('SKU do vendedor', sellerSku(p.sku)),
+      H_.field('GTIN', identifier ? `${identifier.code} (${identifier.type})` : 'não enviado', 'só na criação (a TikTok não permite alterar depois)'),
+      H_.field('Peso / medidas', `${content.package_weight.value} kg · ${content.package_dimensions ? `${content.package_dimensions.length}×${content.package_dimensions.width}×${content.package_dimensions.height} cm` : 'sem dimensões'}`),
+      H_.field('Fotos', `${media.mainImages.length} de ${p.images.length}`),
+      H_.field('Vídeo', video || 'Sem vídeo', video ? 'até 100 MB, proporção 9:16 a 16:9' : null),
+      H_.field('Descrição', H_.excerpt(content.description.replace(/<[^>]+>/g, ' ')), `${content.description.length} caracteres, em HTML`),
+      H_.field('Atributos', attrText === null ? (ctx ? '—' : 'validados no envio') : (attrText || 'nenhum')),
+    ],
+    variants: (p.variants || []).length ? H_.variantRows(p) : null,
+  };
 }
 
 // ---------------------------------------------------------------- apoio

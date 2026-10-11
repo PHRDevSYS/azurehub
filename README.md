@@ -1,39 +1,75 @@
 # AzureHub (beta)
 
-Hub de integrações que publica os produtos de **qualquer site** no
-**Mercado Livre**, na **Shopee** e no **TikTok Shop**. Envia título, descrição,
-preço, preço promocional, estoque, peso/dimensões, marca/GTIN, fotos e vídeos.
+Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
+**Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
+preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-![Painel](docs/painel.png)
-
-> **Versão beta (0.1.0-beta.3).** O fluxo completo está implementado e coberto
-> por testes com as APIs simuladas, mas ainda **não foi validado contra os
-> sandboxes reais** das plataformas — ver [Antes de ir para produção](#antes-de-ir-para-produção).
+> **Versão beta (0.2.0-beta.1).** Fluxo completo implementado e coberto por
+> testes com as APIs simuladas no formato da documentação oficial de cada
+> plataforma; ainda **não validado contra os sandboxes reais** — ver
+> [Antes de ir para produção](#antes-de-ir-para-produção).
 
 ## Como funciona
 
 ```
- Banco do site (MySQL/Postgres/SQLite) ──SELECT──┐
-                                                 ├─► AzureHub ─► fila ─► Mercado Livre
- Site / ERP ── POST /api/v1/products ────────────┘   (normaliza,        ─► Shopee
-                                                      detecta mudança)  ─► TikTok Shop
+ ORIGEM                              AZUREHUB                              DESTINOS
+ Bling (ERP) ─┐                                                       ┌─► Mercado Livre
+ WooCommerce ─┤   captura    ┌──────────┐  seleção  ┌───────┐  fila   ├─► Shopee
+ Shopify ─────┼────────────► │ Produtos │ ────────► │Prévia │ ──────► └─► TikTok Shop
+ Nuvemshop ───┤  (manual ou  └──────────┘ (você     └───────┘ (envio,
+ Banco SQL ───┤  automática)               escolhe)            reenvio,
+ API (push) ──┘                                                atualização)
 ```
 
-1. **Fonte de produtos.** Na instalação o hub pede as **credenciais do banco
-   de dados do site** e uma consulta `SELECT` cujas colunas usam os nomes do
-   hub (`sku`, `title`, `price`, `promo_price`, `images`…). Há modelos prontos
-   (genérico e WooCommerce). Se o site preferir empurrar os dados, existe a
-   API REST com chave (`X-Api-Key`).
-2. **Normalização.** Todo produto vira um modelo único (ver
-   `src/source/normalize.js`). Aceita preços no formato brasileiro (`1.234,50`)
-   e listas de imagens em JSON ou separadas por vírgula, `;`, `|` ou quebra de linha.
-3. **Detecção de mudança.** Cada produto tem um hash do conteúdo; só o que
-   mudou entra na fila.
-4. **Fila e reenvio.** Um envio por vez por plataforma (as três rodam em
-   paralelo). Erros temporários (rede, 429, 5xx) são tentados de novo até
-   5 vezes, com espera crescente (15 s → 30 min).
-5. **Os 3 cards.** Cada plataforma tem seu card: credenciais, conectar a
-   conta (OAuth), testar, ativar e sincronizar.
+O painel tem quatro telas:
+
+| Tela | O que faz |
+|---|---|
+| **Integração** | **Origem:** escolha o ERP/site (Bling, WooCommerce, Shopify, Nuvemshop, banco de dados ou API própria), informe as credenciais, teste e capture. **Destino:** os 3 cards dos marketplaces (credenciais, conectar, testar, ativar). |
+| **Produtos** | Grade dos produtos capturados (SKU, título, preço/promoção, estoque, nº de variações, contagem de mídia, data de atualização e situação em cada destino). Selecione um ou vários, escolha os destinos e **pré-visualize** ou **envie para integração**. |
+| **Prévia** | Como cada produto vai subir em cada marketplace — exatamente o que será enviado (título cortado, categoria, marca, atributos, GTIN, frete, promoção com a janela ajustada, variações…), com **erros** que bloqueiam e **avisos**. Nada é enviado nesta tela. |
+| **Sincronização** | Grade produto × destino com status, ID no marketplace (com link), preço, estoque, data/hora da atualização na origem e da última sincronização, mensagem e situação na fila. Ao clicar, o **detalhe completo**: fotos, vídeos, todos os dados, variações, destinos e histórico. Fila e log de eventos em abas. |
+
+![Integração](docs/integracao.png)
+![Produtos](docs/produtos.png)
+![Prévia](docs/previa.png)
+![Sincronização](docs/sincronizacao.png)
+![Detalhe](docs/detalhe.png)
+
+Regras do fluxo:
+
+1. **Captura não publica.** O que vem da origem fica em *Produtos*, esperando
+   seleção. Só vai para um marketplace depois de **enviado para integração**.
+2. **Depois de enviado, acompanha a origem.** Mudou na origem (preço, estoque,
+   fotos…), a próxima captura detecta pelo hash e reenvia sozinho para os
+   destinos em que o produto está. Em *Sincronização* ele aparece como
+   **desatualizado** até o reenvio.
+3. **Parar de sincronizar:** sem anúncio criado, o produto sai da integração;
+   com anúncio, fica **pausado** (nada é apagado no marketplace).
+4. **Fila e reenvio:** um envio por vez por marketplace (os três em paralelo);
+   erros temporários (rede, 429, 5xx) são tentados até 5 vezes, com espera
+   crescente (15 s → 30 min).
+5. **Prévia** usa a conta conectada só com **endpoints de leitura** (categoria,
+   atributos, marcas, limites, frete); sem conta, aplica as regras fixas de cada
+   marketplace. Fotos e vídeos só são exibidos no detalhe da Sincronização.
+
+## Origens de produtos
+
+| Origem | Como conecta | O que é capturado |
+|---|---|---|
+| **Bling** (ERP) | API v3, OAuth2: crie um app no Bling (escopo Produtos), informe Client ID/secret, salve e clique em **Conectar**. Token de 6 h renovado sozinho (refresh de 30 dias). | Produtos ativos (lista + detalhe): nome, código, descrição complementar, preço, estoque virtual, GTIN, marca, peso bruto, dimensões (m/cm/mm → cm), NCM/CEST/origem, imagens externas e internas, vídeo, variações (`Cor:Azul;Tamanho:P`). Respeita 3 req/s. |
+| **WooCommerce** | REST API v3 com chave/segredo de consumidor (permissão leitura). | Produtos publicados, preço normal/promocional e período, estoque (ou quantidade padrão quando a loja não controla), GTIN (`global_unique_id`), marca, peso/medidas com a unidade da loja, atributos e variações. |
+| **Shopify** | Admin GraphQL API **2026-10**, token de app personalizado (`read_products`, `read_inventory`). | Produtos ativos: `compareAtPrice` vira preço "de" e `price` a promoção, código de barras (`barcodes`), peso, fotos e vídeos (MP4/YouTube), variações (paginadas; respeita o limite de custo de 1000 pontos). |
+| **Nuvemshop** | API `2025-03`: OAuth (App ID + secret) ou store_id + token; exige e-mail de contato (User-Agent). | Produtos publicados no idioma escolhido, preço/promoção, estoque (vazio = "infinito" → quantidade padrão), GTIN (`barcode`), peso/medidas, fotos ordenadas, vídeo, variações. |
+| **Banco de dados** | MySQL/MariaDB, PostgreSQL ou SQLite + uma consulta `SELECT` (modelos genérico e WooCommerce). | O que a consulta devolver com os nomes do hub; variações com `parent_sku` + `option_<Nome>`. |
+| **API própria** | O site faz `POST /api/v1/products` com `X-Api-Key`. | O JSON enviado (ver [API para o site](#api-para-o-site)). |
+
+Para Bling e Nuvemshop, cadastre no app a **URL de redirecionamento** mostrada
+na tela: `<PUBLIC_URL>/oauth/source/<origem>/callback`.
+
+> **Bling:** as imagens *internas* têm validade. Se o envio ao marketplace
+> acontecer muito depois da captura, o link pode expirar — mantenha a captura
+> automática ligada ou prefira imagens externas.
 
 ## Requisitos
 
@@ -58,9 +94,14 @@ npm start
 Abra `PUBLIC_URL` no navegador e siga o assistente:
 
 1. **Administrador**: e-mail e senha do painel.
-2. **Banco de dados do site**: tipo, host, porta, usuário, senha, banco e a
-   consulta. Use **Testar conexão** para ver uma amostra já validada.
+2. **Origem dos produtos**: escolha Bling, WooCommerce, Shopify, Nuvemshop,
+   banco de dados ou API própria e preencha as credenciais. **Testar conexão**
+   mostra uma amostra já normalizada e validada. (Bling/Nuvemshop por OAuth:
+   a conexão é concluída depois, em *Integração › Conectar*.)
 3. **Concluir**: o hub mostra a **chave de API** uma única vez. Guarde-a.
+
+Depois: em **Integração**, conecte e ative os marketplaces; clique em
+**Capturar produtos agora**; em **Produtos**, selecione e envie.
 
 ### Docker
 
@@ -101,9 +142,9 @@ Atrás do nginx, publique com `proxy_pass http://127.0.0.1:3900;`.
 | `MAX_MEDIA_MB` | `100` | Tamanho máximo de foto/vídeo baixado |
 | `SESSION_HOURS` | `12` | Duração da sessão do painel |
 
-## Credenciais de cada plataforma
+## Destinos (marketplaces)
 
-Em todas, cadastre no app do desenvolvedor a **URL de retorno** exibida no card:
+Em todos, cadastre no app do desenvolvedor a **URL de retorno** exibida no card:
 `<PUBLIC_URL>/oauth/<plataforma>/callback`.
 
 ### Mercado Livre
@@ -209,7 +250,11 @@ Conector conferido com a referência oficial (<https://partner.tiktokshop.com/do
 ## API para o site
 
 Autenticação: cabeçalho `X-Api-Key: azh_...` (gerada na instalação, renovável
-na aba **Integração**).
+em **Integração** quando a origem é "API própria").
+
+Os produtos enviados aparecem em **Produtos** para seleção. Para já enviá-los
+para integração, use `?send=shopee,tiktok,mercadolivre` (ou `?send=all`):
+`POST /api/v1/products?send=shopee`.
 
 | Método | Rota | Descrição |
 |---|---|---|
@@ -288,31 +333,36 @@ FROM variacoes v JOIN produtos p ON p.id = v.produto_id
 
 ```
 src/
-  server.js            servidor HTTP (sem Express) + arquivos do painel
-  config.js            .env e caminhos
-  routes/api.js        instalação, login, cards, produtos, fila, OAuth
-  lib/store.js         banco interno (node:sqlite)
-  lib/crypto.js        cofre AES-GCM, scrypt, HMAC
-  lib/media.js         cliente HTTP comum + download de fotos/vídeos
-  source/              leitura do banco do site, modelos de consulta, normalização
-  platforms/           mercadolivre.js, shopee.js, tiktok.js (+ index: tokens/refresh)
-  sync/engine.js       fila, reenvio com backoff, importação automática
-public/                painel (HTML/CSS/JS puro)
-test/                  node:test (APIs das plataformas simuladas)
+  server.js              servidor HTTP (sem Express) + arquivos do painel
+  config.js              .env e caminhos
+  routes/api.js          instalação, login, origem, destinos, produtos, prévia, sincronização, OAuth
+  lib/store.js           banco interno (node:sqlite): produtos, vínculos, fila, logs
+  lib/crypto.js          cofre AES-GCM, scrypt, HMAC
+  lib/media.js           cliente HTTP comum + download de fotos/vídeos
+  source/                captura, normalização, seleção
+    connectors/          bling, woocommerce, shopify, nuvemshop, database, api
+  platforms/             mercadolivre.js, shopee.js, tiktok.js (publicação + prévia)
+  sync/engine.js         fila, reenvio com backoff, captura automática
+  sync/preview.js        prévia produto × destino
+public/                  painel: Integração, Produtos, Prévia, Sincronização
+test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` (50 casos: instalação, autenticação, cofre, publicação nas
-três plataformas, regras do TikTok e da Shopee — esta com cenários de **tênis**
-(2 níveis de variação, GTIN obrigatório, foto por cor, tabela de medidas),
-**roupa** (tamanho padronizado/livre, marca desconhecida, GTIN "00") e
-**utensílio doméstico** (atributos com unidade/data, pré-venda, NCM, canal por
-peso) —, variações vindas do banco, backoff e falha parcial).
+Testes: `npm test` — 66 casos: conectores de origem (Bling, WooCommerce,
+Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
+prévia → envio → sincronização → pausa), publicação e prévia nas três
+plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
+obrigatório, foto por cor, tabela de medidas), **roupa** (tamanho
+padronizado/livre, marca desconhecida, GTIN "00") e **utensílio doméstico**
+(atributos com unidade/data, pré-venda, NCM, canal por peso) —, backoff e
+falha parcial.
 
 ## Antes de ir para produção
 
 Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandboxes:
 
 - [ ] **Validar nos sandboxes reais** com apps de teste das três plataformas
+      e das origens (Bling, WooCommerce, Shopify, Nuvemshop)
       (TikTok e Shopee já foram conferidos contra a documentação oficial; falta
       a chamada real). Na Shopee, conferir em especial o endpoint de variações
       padronizadas (a referência cita `get_variation_tree` e os exemplos
@@ -325,11 +375,14 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
       de status do anúncio) — o beta é só de envio (site → marketplaces).
 - [ ] Shopee: canais de frete `SIZE_SELECTION`/`CUSTOM_PRICE` (exigem tamanho ou valor por produto) e produtos de lojas cross-border CNSC/KRSC (API de produto global).
 - [ ] Declarar o IP da VPS no IP Address Whitelist da Shopee antes de produção.
+- [ ] Shopify com catálogo muito grande: trocar a paginação por *bulk operations*.
 - [ ] Hospedagem: subir na VPS com HTTPS (ex.: `https://azuresystem.com.br/azurehub`).
 
 Documentação de referência:
 [Mercado Livre](https://developers.mercadolivre.com.br/pt_br/api-docs-pt-br) ·
 [Shopee Open Platform](https://open.shopee.com/developer-guide/211) ·
 [TikTok Shop Partner](https://partner.tiktokshop.com/docv2/page/create-product-202309) ·
+[Bling](https://developer.bling.com.br/) · [WooCommerce](https://woocommerce.github.io/woocommerce-rest-api-docs/) ·
+[Shopify](https://shopify.dev/docs/api/admin-graphql) · [Nuvemshop](https://tiendanube.github.io/api-documentation/intro) ·
 [Plug4Market](https://api.plug4market.com.br/docs) (referência de modelo de hub) ·
 [projetos no GitHub](https://github.com/topics/api-mercado-livre).

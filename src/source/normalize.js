@@ -88,6 +88,7 @@ function normalizeProduct(raw) {
     },
     attributes: obj(pick(r, 'attributes', 'atributos')),
     active: !['0', 'false', 'inativo', 'inactive'].includes(String(pick(r, 'active', 'ativo') ?? 'true').toLowerCase()),
+    sourceRef: pick(r, 'sourceRef', 'source_ref') ? String(pick(r, 'sourceRef', 'source_ref')) : null,
   };
   const days = num(pick(r, 'daysToShip', 'days_to_ship', 'prazo_envio'));
   p.daysToShip = days ? Math.trunc(days) : null;

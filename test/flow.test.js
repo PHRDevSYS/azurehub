@@ -90,11 +90,19 @@ test('produto enviado pela API é publicado no Mercado Livre com preço, promoç
     price: 89.9, promoPrice: 69.9, stock: 5, images: ['https://site.test/1.jpg', 'https://site.test/2.jpg'],
     videos: ['https://youtu.be/dQw4w9WgXcQ'], categories: { mercadolivre: 'MLB31447' },
   };
-  const r = await realFetch(`${base}/api/v1/products`, {
+  const push = (qs = '') => realFetch(`${base}/api/v1/products${qs}`, {
     method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify(product),
   }).then((x) => x.json());
+  // Capturado, mas ainda não selecionado para nenhum destino: nada vai para a fila.
+  let r = await push();
   assert.equal(r.changed, 1);
-  assert.equal(store.jobStats().queued, 1);
+  assert.equal(r.queued, 0);
+  assert.equal(store.jobStats().queued || 0, 0);
+  // ?send= seleciona o destino e enfileira mesmo sem alteração.
+  r = await push('?send=mercadolivre');
+  assert.equal(r.unchanged, 1);
+  assert.equal(r.queued, 1);
+  assert.equal(store.getListing('mercadolivre', 'CAM-1').status, 'pending');
 
   const calls = [];
   global.fetch = async (url, init = {}) => {
@@ -122,11 +130,10 @@ test('produto enviado pela API é publicado no Mercado Livre com preço, promoç
   assert.equal(listing.status, 'synced');
   assert.equal(listing.external_id, 'MLB999');
 
-  // Reenviar o mesmo produto não gera job novo.
-  const again = await realFetch(`${base}/api/v1/products`, {
-    method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify(product),
-  }).then((x) => x.json());
+  // Reenviar o mesmo produto (sem ?send) não gera job novo.
+  const again = await push();
   assert.equal(again.unchanged, 1);
+  assert.equal(again.queued, 0);
 });
 
 test('erro 429 da plataforma volta para a fila com backoff', async () => {
@@ -145,8 +152,8 @@ test('motor: falha parcial guarda o id externo e follow-up volta à fila', async
   const ml = require('../src/platforms').REGISTRY.mercadolivre;
   const original = ml.publish;
   try {
-    store.saveListing('mercadolivre', 'CAM-1', { external_id: null, last_hash: null, meta: {} });
     store.open().prepare(`DELETE FROM listings WHERE platform = 'mercadolivre' AND sku = 'CAM-1'`).run();
+    store.selectForPlatform('mercadolivre', 'CAM-1');
     ml.publish = async () => {
       const e = new Error('variações falharam');
       e.partial = { externalId: 'MLB-PARCIAL', meta: { x: 1 } };

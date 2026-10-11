@@ -462,3 +462,47 @@ test('GTIN: dígito verificador GS1', () => {
   assert.ok(validGtin('012345678905'));
   assert.ok(!validGtin('123'));
 });
+
+test('PRÉVIA online: só endpoints de leitura, junta todos os problemas e mostra como vai subir', async () => {
+  const calls = mockShopee();
+  const p = tenis({ attributes: {}, sizeChart: null, videos: ['https://site.test/v.mp4'] });
+  p.variants[1].gtin = null;
+  const r = await shopee.preview(ctx(), p);
+  const writes = calls.filter((c) => c.method === 'POST' && !/get_/.test(c.path));
+  assert.deepEqual(writes, [], 'a prévia não envia foto, vídeo, item nem desconto');
+  assert.equal(r.online, true);
+  const errs = r.errors.join(' | ');
+  assert.match(errs, /exige os atributos "Material".*"Gênero"/);
+  assert.match(errs, /exige tabela de medidas/);
+  assert.match(errs, /GTIN\/EAN válido \(variação TEN-PT-41/);
+  const f = Object.fromEntries(r.fields.map((x) => [x.label, x.value]));
+  assert.equal(f['Categoria'], '100700');
+  assert.equal(f['Marca'], 'Nike (id 1001)');
+  assert.equal(f['Frete'], 'Shopee Xpress, Correios');
+  assert.match(f['Vídeo'], /v\.mp4 — enviado em partes/);
+  assert.equal(r.variants.length, 3);
+  assert.equal(r.variantStructure, 'padronizada da Shopee');
+});
+
+test('PRÉVIA online sem erros traduz atributos para nomes e valores', async () => {
+  mockShopee();
+  const r = await shopee.preview(ctx(), panelas());
+  assert.deepEqual(r.errors, []);
+  const f = Object.fromEntries(r.fields.map((x) => [x.label, x.value]));
+  assert.equal(f['Atributos'], 'Material: Alumínio; Capacidade: 2.5 L; Quantidade de Peças: 5; Data de Fabricação: 01/03/2026');
+  assert.equal(f['GTIN'], '00');
+  assert.equal(f['Prazo de postagem'], '10 dias (pré-venda)');
+  assert.match(f['Promoção'], /R\$\s?329,90 · /);
+});
+
+test('PRÉVIA offline (conta não conectada): regras fixas da Shopee', async () => {
+  const global0 = global.fetch;
+  global.fetch = async () => { throw new Error('não deveria chamar a rede'); };
+  const p = tenis();
+  p.variants[2].price = 1299.9;
+  const r = await shopee.preview(null, p);
+  global.fetch = global0;
+  assert.equal(r.online, false);
+  assert.match(r.errors.join(), /4× a mais barata/);
+  assert.ok(r.warnings.some((w) => /não conectada/.test(w)));
+});

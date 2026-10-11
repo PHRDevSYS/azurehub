@@ -6,22 +6,23 @@ const { hashPassword, verifyPassword, sha256, randomToken, safeEqual } = require
 const platforms = require('../platforms');
 const source = require('../source');
 const engine = require('../sync/engine');
+const { previewProducts } = require('../sync/preview');
 
 const COOKIE = 'azurehub_session';
 const installed = () => !!store.getSetting('installed');
 
 // ---------- middlewares ----------
-function requireInstalled(ctx) {
+function requireInstalled() {
   if (!installed()) throw new HttpError(409, 'Hub ainda não instalado');
 }
 function requireAdmin(ctx) {
-  requireInstalled(ctx);
+  requireInstalled();
   const token = parseCookies(ctx.req)[COOKIE];
   if (!token || !store.sessionValid(sha256(token))) throw new HttpError(401, 'Faça login');
 }
 // Site integrado: X-Api-Key. A sessão do painel também é aceita.
 function requireApiKeyOrAdmin(ctx) {
-  requireInstalled(ctx);
+  requireInstalled();
   const key = ctx.req.headers['x-api-key'];
   if (key) {
     if (!safeEqual(sha256(key), store.getSetting('apiKeyHash') || '')) throw new HttpError(401, 'X-Api-Key inválida');
@@ -45,41 +46,46 @@ function setSession(ctx) {
   ctx.res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${config.sessionHours * 3600}${secure}`);
 }
 
-function cleanSource(s) {
-  if (!s || !['mysql', 'postgres', 'sqlite', 'api'].includes(s.type)) throw new HttpError(400, 'Tipo de banco inválido');
-  const out = { type: s.type };
-  if (s.type !== 'api') {
-    for (const k of ['host', 'port', 'user', 'password', 'database', 'query', 'ssl']) out[k] = s[k];
-    if (!out.database) throw new HttpError(400, 'Informe o banco de dados');
-    if (!out.query) throw new HttpError(400, 'Informe a consulta de produtos');
-    if (s.type !== 'sqlite' && !out.host) throw new HttpError(400, 'Informe o host do banco');
+// Corpo da origem: aceita o formato antigo ({type:'mysql', ...}).
+function readSource(body) {
+  const s = { ...(body || {}) };
+  if (['mysql', 'postgres', 'sqlite'].includes(s.type)) { s.engine = s.type; s.type = 'database'; }
+  try {
+    return source.cleanSource(s);
+  } catch (e) {
+    throw new HttpError(400, e.message);
   }
-  return out;
 }
 
-function maskSource(s) {
-  if (!s) return null;
-  return { ...s, password: s.password ? '••••••' : '' };
+// Testa antes de salvar quando a origem não depende de OAuth.
+async function checkSource(cfg) {
+  const c = source.connectors.get(cfg.type);
+  if (c.push || c.oauth) return null;
+  try {
+    return await source.testSource(cfg);
+  } catch (e) {
+    throw new HttpError(400, `Falha ao acessar a origem: ${e.message}`);
+  }
 }
+
+const list = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((x) => String(x).trim()).filter(Boolean);
 
 function register(r) {
   // ---------- status / instalação ----------
-  r.get('/api/status', async () => ({
-    installed: installed(), version: config.VERSION, publicUrl: config.publicUrl,
-  }));
+  r.get('/api/status', async () => ({ installed: installed(), version: config.VERSION, publicUrl: config.publicUrl }));
 
-  r.get('/api/source/presets', async () => source.PRESETS);
+  r.get('/api/sources', async (ctx) => {
+    if (installed()) requireAdmin(ctx);
+    return source.catalog();
+  });
 
   r.post('/api/source/test', async (ctx) => {
     if (installed()) requireAdmin(ctx);
-    const body = await readJson(ctx.req);
-    let s = cleanSource(body);
-    // Senha mascarada = manter a já salva.
-    if (installed() && s.password === '••••••') s.password = (store.getSecretSetting('source') || {}).password;
+    const cfg = readSource(await readJson(ctx.req));
     try {
-      return await source.testSource(s);
+      return await source.testSource(cfg);
     } catch (e) {
-      throw new HttpError(400, `Falha ao consultar a fonte: ${e.message}`);
+      throw new HttpError(400, `Falha ao acessar a origem: ${e.message}`);
     }
   });
 
@@ -90,18 +96,16 @@ function register(r) {
     const password = String(body.password || '');
     if (!/^\S+@\S+\.\S+$/.test(email)) throw new HttpError(400, 'E-mail inválido');
     if (password.length < 8) throw new HttpError(400, 'A senha precisa de ao menos 8 caracteres');
-    const s = cleanSource(body.source);
-    if (s.type !== 'api') {
-      try { await source.testSource(s); } catch (e) { throw new HttpError(400, `Falha ao consultar a fonte: ${e.message}`); }
-    }
+    const cfg = readSource(body.source);
+    await checkSource(cfg);
     const apiKey = `azh_${randomToken(24)}`;
     store.setSetting('admin', { email, hash: hashPassword(password) });
-    store.setSecretSetting('source', s);
+    source.saveSource(cfg);
     store.setSetting('apiKeyHash', sha256(apiKey));
     store.setSetting('autoImportMinutes', Number(body.autoImportMinutes || 0));
     for (const id of platforms.ids()) store.ensurePlatform(id);
     store.setSetting('installed', true);
-    store.log('info', `Hub instalado (fonte: ${s.type})`);
+    store.log('info', `Hub instalado (origem: ${cfg.type})`);
     engine.scheduleAutoImport();
     setSession(ctx);
     return { ok: true, apiKey };
@@ -109,7 +113,7 @@ function register(r) {
 
   // ---------- sessão ----------
   r.post('/api/login', async (ctx) => {
-    requireInstalled(ctx);
+    requireInstalled();
     const ip = ctx.req.socket.remoteAddress;
     const a = throttle(ip);
     const { email, password } = await readJson(ctx.req);
@@ -134,7 +138,46 @@ function register(r) {
 
   r.get('/api/me', requireAdmin, async () => ({ email: store.getSetting('admin').email }));
 
-  // ---------- plataformas (os 3 cards) ----------
+  // ---------- Integração: origem ----------
+  r.get('/api/source', requireAdmin, async () => source.summary());
+
+  r.put('/api/source', requireAdmin, async (ctx) => {
+    const body = await readJson(ctx.req);
+    const cfg = readSource(body.source);
+    const test = await checkSource(cfg);
+    source.saveSource(cfg);
+    store.setSetting('autoImportMinutes', Number(body.autoImportMinutes || 0));
+    engine.scheduleAutoImport();
+    store.log('info', `Origem configurada: ${source.connectors.get(cfg.type).name}`);
+    return { ok: true, test, summary: source.summary() };
+  });
+
+  r.post('/api/source/authorize', requireAdmin, async () => {
+    const cfg = source.getSource();
+    const c = cfg && source.connectors.get(cfg.type);
+    if (!c || !c.oauth) throw new HttpError(400, 'A origem configurada não usa conexão por OAuth');
+    if (!c.oauth.available(cfg)) throw new HttpError(400, 'Salve as credenciais do aplicativo antes de conectar');
+    const state = randomToken(16);
+    store.saveOAuthState(state, `source:${c.id}`);
+    return { url: c.oauth.authorizeUrl({ cfg, state, redirectUri: source.redirectUri(c.id) }) };
+  });
+
+  r.post('/api/source/disconnect', requireAdmin, async () => {
+    store.setSecretSetting('source_tokens', null);
+    store.log('info', 'Origem desconectada');
+    return source.summary();
+  });
+
+  // Captura agora (manual).
+  r.post('/api/source/import', requireAdmin, async () => {
+    try {
+      return await source.importFromSource();
+    } catch (e) {
+      throw new HttpError(400, `Falha na captura: ${e.message}`);
+    }
+  });
+
+  // ---------- Integração: destinos (os 3 cards) ----------
   r.get('/api/platforms', requireAdmin, async () => platforms.ids().map(platforms.summary));
 
   r.put('/api/platforms/:id/credentials', requireAdmin, async (ctx) => {
@@ -171,9 +214,9 @@ function register(r) {
     const { enabled } = await readJson(ctx.req);
     store.setEnabled(p.id, !!enabled);
     if (enabled) {
-      // Produtos ainda não enviados para esta plataforma entram na fila.
+      // Produtos já selecionados para este destino e ainda não enviados entram na fila.
       const pending = store.open().prepare(
-        `SELECT sku FROM products WHERE sku NOT IN (SELECT sku FROM listings WHERE platform = ? AND status = 'synced')`,
+        `SELECT sku FROM listings WHERE platform = ? AND status IN ('pending', 'error', 'skipped')`,
       ).all(p.id);
       for (const row of pending) store.enqueue(p.id, row.sku);
     }
@@ -195,69 +238,89 @@ function register(r) {
     return platforms.summary(ctx.params.id);
   });
 
-  // ---------- produtos ----------
-  // Endpoint de integração para qualquer site: aceita 1 produto ou lista.
-  r.post('/api/v1/products', requireApiKeyOrAdmin, async (ctx) => {
-    const body = await readJson(ctx.req);
-    const list = Array.isArray(body) ? body : Array.isArray(body.products) ? body.products : [body];
-    if (list.length > 1000) throw new HttpError(413, 'Envie no máximo 1000 produtos por requisição');
-    return source.ingest(list, 'api');
-  });
-
-  r.delete('/api/v1/products/:sku', requireApiKeyOrAdmin, async (ctx) => {
-    // Remover do hub não apaga anúncios: zera o estoque antes, via sync.
-    const p = store.getProduct(ctx.params.sku);
-    if (!p) throw new HttpError(404, 'Produto não encontrado');
-    return source.ingest([{ ...p.data, active: false, stock: 0 }], p.origin);
-  });
-
-  r.get('/api/v1/products/:sku', requireApiKeyOrAdmin, async (ctx) => {
-    const p = store.getProduct(ctx.params.sku);
-    if (!p) throw new HttpError(404, 'Produto não encontrado');
-    const listings = Object.fromEntries(platforms.ids().map((id) => [id, store.getListing(id, p.sku)]));
-    return { ...p.data, origin: p.origin, updatedAt: p.updated_at, listings };
-  });
-
+  // ---------- Produtos capturados ----------
   r.get('/api/products', requireAdmin, async (ctx) => {
     const q = ctx.url.searchParams;
     return store.listProducts({
-      limit: Math.min(200, Number(q.get('limit') || 50)),
+      limit: Math.min(500, Number(q.get('limit') || 100)),
       offset: Number(q.get('offset') || 0),
       search: q.get('q') || '',
+      filter: q.get('filter') || 'all',
     });
   });
 
-  // ---------- fonte / sincronização ----------
-  r.get('/api/source', requireAdmin, async () => ({
-    source: maskSource(store.getSecretSetting('source')),
-    autoImportMinutes: store.getSetting('autoImportMinutes', 0),
-  }));
-
-  r.put('/api/source', requireAdmin, async (ctx) => {
-    const body = await readJson(ctx.req);
-    const s = cleanSource(body.source);
-    if (s.password === '••••••') s.password = (store.getSecretSetting('source') || {}).password;
-    if (s.type !== 'api') {
-      try { await source.testSource(s); } catch (e) { throw new HttpError(400, `Falha ao consultar a fonte: ${e.message}`); }
+  // Detalhe completo (tela Sincronização): dados, mídia, vínculos, fila e log.
+  r.get('/api/products/:sku', requireAdmin, async (ctx) => {
+    const p = store.getProduct(ctx.params.sku);
+    if (!p) throw new HttpError(404, 'Produto não encontrado');
+    const listings = {};
+    for (const id of platforms.ids()) {
+      const l = store.getListing(id, p.sku);
+      if (l) {
+        const { images, video, size_chart: chart, ...meta } = l.meta || {};
+        listings[id] = { ...l, meta, outdated: l.last_hash !== p.hash && l.status !== 'paused', mediaSent: images ? Object.keys(images).length : 0 };
+      }
     }
-    store.setSecretSetting('source', s);
-    store.setSetting('autoImportMinutes', Number(body.autoImportMinutes || 0));
-    engine.scheduleAutoImport();
+    return {
+      product: p.data, origin: p.origin, capturedAt: p.captured_at, updatedAt: p.updated_at,
+      listings, jobs: store.jobsFor(p.sku), logs: store.listLogs({ sku: p.sku, limit: 50 }),
+    };
+  });
+
+  // Enviar para integração: seleciona os produtos nos destinos e enfileira.
+  r.post('/api/integrations/send', requireAdmin, async (ctx) => {
+    const body = await readJson(ctx.req);
+    const skus = list(body.skus);
+    const targets = list(body.platforms);
+    if (!skus.length) throw new HttpError(400, 'Selecione ao menos um produto');
+    if (!targets.length) throw new HttpError(400, 'Selecione ao menos um destino');
+    for (const id of targets) {
+      const s = platforms.summary(id);
+      if (!s.connected) throw new HttpError(400, `${s.name}: conecte a conta na tela Integração`);
+      if (!s.enabled) throw new HttpError(400, `${s.name}: ative o destino na tela Integração`);
+    }
+    const queued = targets.reduce((n, id) => n + engine.enqueueAll(id, skus), 0);
+    store.log('info', `Enviados para integração: ${skus.length} produto(s) → ${targets.join(', ')}`);
+    return { queued };
+  });
+
+  // Parar de sincronizar (sem anúncio: desfaz a seleção; com anúncio: pausa).
+  r.post('/api/integrations/stop', requireAdmin, async (ctx) => {
+    const body = await readJson(ctx.req);
+    const skus = list(body.skus);
+    const targets = list(body.platforms).length ? list(body.platforms) : platforms.ids();
+    for (const id of targets) for (const sku of skus) store.unselect(id, sku);
     return { ok: true };
   });
 
-  r.post('/api/source/import', requireAdmin, async () => {
-    try {
-      return await source.importFromSource();
-    } catch (e) {
-      throw new HttpError(400, `Falha na importação: ${e.message}`);
-    }
+  // Prévia de como os produtos vão subir (sem enviar nada).
+  r.post('/api/preview', requireAdmin, async (ctx) => {
+    const body = await readJson(ctx.req);
+    const skus = list(body.skus);
+    const targets = list(body.platforms).filter((id) => platforms.ids().includes(id));
+    if (!skus.length || !targets.length) throw new HttpError(400, 'Informe produtos e destinos');
+    if (skus.length > 20) throw new HttpError(400, 'Prévia de no máximo 20 produtos por vez');
+    return previewProducts(skus, targets);
   });
 
+  // ---------- Sincronização ----------
+  r.get('/api/sync', requireAdmin, async (ctx) => {
+    const q = ctx.url.searchParams;
+    const data = store.listSync({
+      limit: Math.min(500, Number(q.get('limit') || 100)),
+      offset: Number(q.get('offset') || 0),
+      search: q.get('q') || '',
+      platform: q.get('platform') || '',
+      status: q.get('status') || '',
+    });
+    return { ...data, counts: store.syncCounts(), jobs: store.jobStats(), lastCapture: store.getSetting('last_capture', null) };
+  });
+
+  // Reenviar: força o envio dos selecionados (ou de todos já selecionados).
   r.post('/api/sync', requireAdmin, async (ctx) => {
     const { platform, skus } = await readJson(ctx.req);
     if (platform) platforms.get(platform);
-    return { queued: engine.enqueueAll(platform || null, skus) };
+    return { queued: engine.enqueueAll(platform || null, skus && skus.length ? list(skus) : null) };
   });
 
   r.get('/api/jobs', requireAdmin, async () => ({ stats: store.jobStats(), items: store.listJobs(200) }));
@@ -271,7 +334,54 @@ function register(r) {
     return { apiKey };
   });
 
-  // ---------- retorno do OAuth ----------
+  // ---------- API para o site (origem "API própria") ----------
+  // ?send=shopee,tiktok (ou "all") já envia para integração nesses destinos.
+  r.post('/api/v1/products', requireApiKeyOrAdmin, async (ctx) => {
+    const body = await readJson(ctx.req);
+    const products = Array.isArray(body) ? body : Array.isArray(body.products) ? body.products : [body];
+    if (products.length > 1000) throw new HttpError(413, 'Envie no máximo 1000 produtos por requisição');
+    let sendTo = list(ctx.url.searchParams.get('send'));
+    if (sendTo.includes('all')) sendTo = platforms.ids();
+    for (const id of sendTo) platforms.get(id);
+    return source.ingest(products, 'api', { sendTo });
+  });
+
+  r.delete('/api/v1/products/:sku', requireApiKeyOrAdmin, async (ctx) => {
+    // Desativar: zera o estoque/deslista nos destinos, sem apagar anúncios.
+    const p = store.getProduct(ctx.params.sku);
+    if (!p) throw new HttpError(404, 'Produto não encontrado');
+    return source.ingest([{ ...p.data, active: false, stock: 0 }], p.origin);
+  });
+
+  r.get('/api/v1/products/:sku', requireApiKeyOrAdmin, async (ctx) => {
+    const p = store.getProduct(ctx.params.sku);
+    if (!p) throw new HttpError(404, 'Produto não encontrado');
+    const listings = Object.fromEntries(platforms.ids().map((id) => [id, store.getListing(id, p.sku)]));
+    return { ...p.data, origin: p.origin, updatedAt: p.updated_at, listings };
+  });
+
+  // ---------- retornos de OAuth ----------
+  r.get('/oauth/source/:id/callback', async (ctx) => {
+    const query = Object.fromEntries(ctx.url.searchParams);
+    const st = store.consumeOAuthState(query.state);
+    const id = ctx.params.id;
+    if (!st || st.platform !== `source:${id}`) {
+      return redirect(ctx.res, `/#oauth=erro&p=origem&msg=${encodeURIComponent('Link de autorização expirado ou inválido. Tente conectar de novo.')}`);
+    }
+    try {
+      const cfg = source.getSource();
+      const c = source.connectors.get(id);
+      if (!cfg || cfg.type !== id) throw new Error('A origem configurada mudou durante a autorização');
+      const tokens = await c.oauth.handleCallback({ cfg, query, redirectUri: source.redirectUri(id) });
+      store.setSecretSetting('source_tokens', tokens);
+      store.log('info', `Origem ${c.name} conectada`);
+      return redirect(ctx.res, '/#oauth=ok&p=origem');
+    } catch (e) {
+      store.log('error', `Falha ao conectar a origem: ${e.message}`);
+      return redirect(ctx.res, `/#oauth=erro&p=origem&msg=${encodeURIComponent(e.message)}`);
+    }
+  });
+
   r.get('/oauth/:id/callback', async (ctx) => {
     const query = Object.fromEntries(ctx.url.searchParams);
     const st = store.consumeOAuthState(query.state);
