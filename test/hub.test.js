@@ -75,7 +75,8 @@ test('Prévia offline e envio exige destino conectado e ativo', async () => {
   const ten = pv.body.items.find((i) => i.sku === 'TEN');
   assert.equal(ten.platforms.shopee.ready, true);
   assert.equal(ten.platforms.shopee.connected, false);
-  assert.equal(ten.platforms.mercadolivre.ready, false, 'ML ainda não publica variações');
+  assert.equal(ten.platforms.mercadolivre.ready, true, 'ML publica variações (modelo definido pela conta no envio)');
+  assert.match(ten.platforms.mercadolivre.fields.find((f) => f.label === 'Modelo de anúncio').value, /clássico ou User Products/);
   assert.equal(ten.platforms.shopee.action, 'criar');
 
   let s = await call('POST', '/api/integrations/send', { skus: ['GAR'], platforms: ['shopee'] });

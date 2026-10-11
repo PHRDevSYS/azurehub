@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.4.0-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.5.0-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -277,6 +277,25 @@ Em todos, cadastre no app do desenvolvedor a **URL de retorno** exibida no card:
 - Promoção: campanha própria do vendedor (`PRICE_DISCOUNT`, `deal_price`).
 - Vídeo: o anúncio aceita link do **YouTube** (`video_id`). Arquivos de vídeo
   (clips) ficam para a próxima versão; o hub avisa no log.
+- **Variações** (tênis, roupas): o ML tem dois modelos e o hub escolhe pela
+  conta (`GET /users/me` → tag `user_product_seller`):
+  - **User Products** (contas migradas): cada variação vira um anúncio próprio,
+    com `family_name` (sem `title` nem `variations`), preço e estoque por
+    variação; o ML agrupa os anúncios na mesma família. Variação sem estoque
+    tem o anúncio criado quando houver estoque; variação removida na origem
+    tem o anúncio **pausado** (encerrar não tem volta). Antes de criar, o hub
+    procura pelo `SELLER_SKU` para nunca duplicar. Cor/tamanho de um anúncio
+    já criado só mudam pelo editor de família do ML.
+  - **Clássico**: um anúncio com `variations` (`attribute_combinations`, fotos,
+    `SELLER_SKU` e GTIN por variação). O preço é **único**: com preços
+    diferentes, vai o maior para todas (o ML cobraria o maior de qualquer
+    forma) e o hub avisa. No PUT, todas as variações que ficam vão com `id`
+    (as omitidas são apagadas pelo ML). Promoção só se todas as variações
+    tiverem.
+  - As opções do produto (`Cor`, `Tamanho`...) são casadas com os atributos da
+    categoria que permitem variação (`COLOR`, `SIZE`...). Mesma cor = mesmas
+    fotos (regra `defines_picture`). Se a conta migrou e o cache ainda dizia
+    "clássico", o erro do ML faz o hub refazer no modelo User Products.
 
 ### Shopee
 Conector conferido com a documentação oficial (<https://open.shopee.com/developer-guide/211>
@@ -368,6 +387,22 @@ Conector conferido com a referência oficial (<https://partner.tiktokshop.com/do
 - *Get Authorized Category Assets* (`/authorization/202405/category_assets`)
   é da autorização de **parceiro** (APIs de Affiliate Partner / TAP) e não se
   aplica à publicação de produtos do vendedor; o hub não o utiliza.
+- **Variações**: uma SKU por variação, com `sales_attributes` (até 3 tipos;
+  nome até 20 e valor até 50 caracteres; até 300 SKUs no BR). Cada opção usa o
+  atributo de venda **padrão** da categoria quando existe (Cor ↔ Color,
+  Tamanho ↔ Size, por `value_id` quando o valor está na lista) e, se não,
+  um atributo **personalizado**. Uma foto por valor do 1º tipo (ex.: por cor,
+  `use_case ATTRIBUTE_IMAGE`). Preço, estoque e GTIN (único) por SKU.
+  - Preço e estoque mudam pelos endpoints próprios, sem auditoria. Variação
+    nova, removida ou com opções alteradas vai por *Partial Edit* com a lista
+    **completa** de SKUs (a TikTok apaga as omitidas), com os ids lidos do
+    *Get Product*.
+  - A TikTok documenta estoque por SKU de 1 a 99.999: variação sem estoque fica
+    fora na criação; quando zera depois, o hub tenta 0 e, se recusado, tira a
+    SKU do anúncio (volta quando houver estoque). Todas sem estoque = produto
+    desativado.
+  - Promoção por SKU (`product_level: VARIATION`), só nas variações com preço
+    promocional.
 
 ## API para o site
 
@@ -428,8 +463,9 @@ Obrigatórios: `sku`, `title`, `price > 0` e ao menos 1 imagem. A resposta traz
 - `variants`: todas as variações precisam ter as mesmas chaves em `options`.
   Preço/estoque do produto passam a ser derivados delas; `promoPrice` do
   produto vale para as variações sem promoção própria.
-- **Variações no Mercado Livre e no TikTok Shop ainda não são publicadas**
-  (o produto fica com erro explicativo nesses dois); a Shopee já publica.
+- Os três marketplaces publicam variações (ver cada destino acima). Use nas
+  `options` os nomes que os marketplaces conhecem (`Cor`, `Tamanho`,
+  `Voltagem`...) para cair nos atributos padrão de cada categoria.
 
 ### Variações vindas do banco do site
 
@@ -478,14 +514,17 @@ public/                  painel: Integração, Produtos, Precificação, Prévia
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` — 92 casos: conectores de origem (Bling, WooCommerce,
+Testes: `npm test` — 111 casos: conectores de origem (Bling, WooCommerce,
 Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
 prévia → envio → sincronização → pausa), publicação e prévia nas três
 plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
 obrigatório, foto por cor, tabela de medidas), **roupa** (tamanho
 padronizado/livre, marca desconhecida, GTIN "00") e **utensílio doméstico**
-(atributos com unidade/data, pré-venda, NCM, canal por peso) —, backoff e
-falha parcial; e a Precificação: similaridade, `robots.txt`, cada fonte de
+(atributos com unidade/data, pré-venda, NCM, canal por peso) —, variações no
+**Mercado Livre** (modelo clássico e User Products, troca automática entre
+eles, sem duplicar anúncio) e no **TikTok Shop** (atributos de venda padrão ou
+personalizados, foto por cor, SKU nova/removida por edição parcial, estoque 0,
+promoção por SKU), backoff e falha parcial; e a Precificação: similaridade, `robots.txt`, cada fonte de
 pesquisa com respostas simuladas (inclusive o trabalhador Scrapling), regras
 de piso/teto/arredondamento, aplicação em massa, preço efetivo no envio
 (acompanhando origem e custo) e reenvio automático dos produtos já publicados,
@@ -503,7 +542,10 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
       `get_variations`; o hub tenta os dois) e a estrutura livre de variação.
 - [ ] **Atributos obrigatórios por categoria** no Mercado Livre (TikTok e
       Shopee já consultam e validam).
-- [ ] **Variações no Mercado Livre e no TikTok Shop** (a Shopee já publica).
+- [ ] **Variações no ML e no TikTok com contas reais**: conferir no sandbox/
+      usuário de teste o modelo User Products do ML (agrupamento em família) e,
+      na TikTok, se a loja aceita estoque 0 por SKU e a troca de produto simples
+      para produto com variações.
 - [ ] **Vídeo no Mercado Livre** por arquivo (clips); hoje só YouTube.
 - [ ] **Webhooks/notificações** das plataformas (pedidos, perguntas, mudança
       de status do anúncio) — o beta é só de envio (site → marketplaces).
