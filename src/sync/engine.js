@@ -5,6 +5,7 @@
 const store = require('../lib/store');
 const platforms = require('../platforms');
 const config = require('../config');
+const pricing = require('../pricing');
 
 const MAX_ATTEMPTS = 5;
 const busy = new Set();
@@ -23,18 +24,20 @@ async function processJob(job) {
     store.finishJob(job.id, 'done', listing ? 'sincronização pausada' : 'produto não selecionado para este destino');
     return;
   }
-  if (listing.status === 'synced' && listing.last_hash === product.hash) {
+  const syncHash = store.syncHashOf(product);
+  if (listing.status === 'synced' && listing.last_hash === syncHash) {
     store.finishJob(job.id, 'done', 'sem alterações');
     return;
   }
   try {
     const ctx = await platforms.context(platform);
-    const res = await ctx.platform.publish(ctx, product.data, listing);
+    // Preço definido na Precificação (se o módulo estiver ativo).
+    const res = await ctx.platform.publish(ctx, pricing.effectiveProduct(product.data), listing);
     // Sem externalId = a plataforma adiou a criação (ex.: TikTok sem estoque).
     // followUpMs = há etapa pendente (ex.: vídeo transcodificando): volta à fila.
     store.saveListing(platform, sku, {
       external_id: res.externalId, status: res.externalId ? 'synced' : 'skipped',
-      last_hash: res.followUpMs ? null : product.hash,
+      last_hash: res.followUpMs ? null : syncHash,
       meta: res.meta, last_error: res.warnings.length ? res.warnings.join(' | ') : null, last_sync: store.now(),
     });
     store.finishJob(job.id, 'done');

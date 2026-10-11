@@ -11,7 +11,9 @@ const PUBLIC = path.join(config.ROOT, 'public');
 function createServer() {
   store.open();
   const router = createRouter();
-  require('./routes/api').register(router);
+  const api = require('./routes/api');
+  api.register(router);
+  require('./routes/pricing').register(router, { requireAdmin: api.requireAdmin });
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');

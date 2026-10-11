@@ -4,6 +4,7 @@
 // não conectado → regras fixas da plataforma.
 const store = require('../lib/store');
 const platforms = require('../platforms');
+const pricing = require('../pricing');
 
 const TIMEOUT_MS = 45000;
 
@@ -29,7 +30,9 @@ async function previewProducts(skus, targets) {
       items.push({ sku, missing: true, platforms: {} });
       continue;
     }
-    const entry = { sku, title: prod.data.title, platforms: {} };
+    // Preço de venda definido na Precificação entra na prévia.
+    const data = pricing.effectiveProduct(prod.data);
+    const entry = { sku, title: prod.data.title, pricing: data.pricing || null, platforms: {} };
     for (const id of targets) {
       const listing = store.getListing(id, sku);
       const base = {
@@ -40,12 +43,12 @@ async function previewProducts(skus, targets) {
       };
       const plat = platforms.get(id);
       try {
-        const r = await withTimeout(plat.preview(ctxs[id], prod.data), TIMEOUT_MS);
+        const r = await withTimeout(plat.preview(ctxs[id], data), TIMEOUT_MS);
         entry.platforms[id] = { ...base, ...r, ready: r.errors.length === 0 };
       } catch (e) {
         // Falha na conta (credencial, rede): mostra as regras offline e mantém o
         // problema como bloqueio — o envio falharia pelo mesmo motivo.
-        const offline = await plat.preview(null, prod.data).catch(() => ({ fields: [], variants: null, warnings: [], errors: [] }));
+        const offline = await plat.preview(null, data).catch(() => ({ fields: [], variants: null, warnings: [], errors: [] }));
         entry.platforms[id] = {
           ...base, ...offline, online: false, ready: false,
           errors: [`Não foi possível validar na conta (${e.message}). Confira as credenciais/conexão em Integração.`, ...offline.errors],

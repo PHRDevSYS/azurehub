@@ -70,6 +70,7 @@ function normalizeProduct(raw) {
     gtin: pick(r, 'gtin', 'ean', 'barcode') ? String(pick(r, 'gtin', 'ean', 'barcode')) : null,
     condition: String(pick(r, 'condition', 'condicao') || 'new').toLowerCase() === 'used' ? 'used' : 'new',
     price: num(pick(r, 'price', 'preco', 'regular_price')),
+    cost: num(pick(r, 'cost', 'custo', 'preco_custo')),
     promoPrice: num(pick(r, 'promoPrice', 'promo_price', 'sale_price', 'preco_promocional')),
     promoStart: date(pick(r, 'promoStart', 'promo_start')),
     promoEnd: date(pick(r, 'promoEnd', 'promo_end')),
@@ -194,7 +195,9 @@ function validateVariants(variants) {
   return errors;
 }
 
-const productHash = (p) => sha256(JSON.stringify(p));
+// O custo só serve à Precificação (nunca vai aos marketplaces): fica fora do
+// hash para não disparar reenvio nem mudar o hash de quem já estava integrado.
+const productHash = (p) => sha256(JSON.stringify({ ...p, cost: undefined }));
 
 // Banco do site com uma linha por variação: linhas com o mesmo parent_sku
 // viram um produto com "variants". Os dados do produto (título, descrição,

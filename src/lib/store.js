@@ -4,7 +4,7 @@
 // vínculo produto ↔ anúncio em cada plataforma, fila de jobs e logs.
 const { DatabaseSync } = require('node:sqlite');
 const config = require('../config');
-const { encrypt, decrypt } = require('./crypto');
+const { encrypt, decrypt, sha256 } = require('./crypto');
 
 let db = null;
 
@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pricing (
+  sku TEXT PRIMARY KEY,
+  price REAL,                -- preço de venda definido (NULL = usa o da origem)
+  strategy TEXT,             -- minimo | medio | origem | sugerido | manual
+  watch TEXT,                -- JSON: URLs de concorrentes monitoradas
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS price_research (
+  sku TEXT PRIMARY KEY,
+  data TEXT NOT NULL,        -- JSON: ofertas, estatísticas, fontes consultadas
+  collected_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS oauth_states (
   state TEXT PRIMARY KEY,
   platform TEXT NOT NULL,
@@ -89,7 +101,30 @@ function migrate() {
     db.exec('UPDATE products SET captured_at = updated_at WHERE captured_at IS NULL');
   }
   if (!cols('listings').includes('selected_at')) db.exec('ALTER TABLE listings ADD COLUMN selected_at TEXT');
+  if (!cols('products').includes('sync_hash')) db.exec('ALTER TABLE products ADD COLUMN sync_hash TEXT');
 }
+
+// Hash do que vai para os marketplaces: conteúdo do produto + preço definido
+// na Precificação (quando o módulo está ativo). Mudar o preço também deixa o
+// anúncio "desatualizado" e dispara o reenvio dos já integrados.
+function pricingKey(sku) {
+  const cfg = getSetting('pricing', {}) || {};
+  if (!cfg.enabled) return '';
+  const row = get('SELECT price FROM pricing WHERE sku = ?', sku);
+  if (!row || row.price === null) return '';
+  return JSON.stringify([row.price, !!cfg.showOriginAsList]);
+}
+
+function refreshSyncHash(sku) {
+  const row = get('SELECT hash FROM products WHERE sku = ?', sku);
+  if (!row) return null;
+  const key = pricingKey(sku);
+  const syncHash = key ? sha256(`${row.hash}|${key}`) : row.hash;
+  run('UPDATE products SET sync_hash = ? WHERE sku = ?', syncHash, sku);
+  return syncHash;
+}
+
+const syncHashOf = (row) => row.sync_hash || row.hash;
 
 function close() {
   if (db) db.close();
@@ -152,13 +187,15 @@ function isEnabled(platform) {
 
 // ---------- produtos ----------
 function upsertProduct(product, hash, origin) {
-  const prev = get('SELECT hash FROM products WHERE sku = ?', product.sku);
-  if (prev && prev.hash === hash) return false;
+  const prev = get('SELECT hash, data FROM products WHERE sku = ?', product.sku);
+  // Mesmo hash e mesmos dados = nada a fazer. Só o custo mudou: grava, sem reenvio.
+  if (prev && prev.hash === hash && prev.data === JSON.stringify(product)) return false;
   const t = now();
   run(`INSERT INTO products(sku, data, hash, origin, updated_at, captured_at) VALUES(?, ?, ?, ?, ?, ?)
        ON CONFLICT(sku) DO UPDATE SET data = excluded.data, hash = excluded.hash,
        origin = excluded.origin, updated_at = excluded.updated_at`,
     product.sku, JSON.stringify(product), hash, origin, t, t);
+  refreshSyncHash(product.sku);
   return true;
 }
 function getProduct(sku) {
@@ -183,7 +220,7 @@ function listProducts({ limit = 50, offset = 0, search = '', filter = 'all' } = 
   if (filter === 'sent') where.push('sku IN (SELECT sku FROM listings)');
   if (filter === 'error') where.push(`sku IN (SELECT sku FROM listings WHERE status = 'error')`);
   const w = where.join(' AND ');
-  const rows = all(`SELECT sku, data, hash, origin, updated_at, captured_at FROM products WHERE ${w}
+  const rows = all(`SELECT sku, data, hash, sync_hash, origin, updated_at, captured_at FROM products WHERE ${w}
     ORDER BY updated_at DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
   const total = get(`SELECT COUNT(*) AS n FROM products WHERE ${w}`, ...args).n;
   const bySku = listingsBySku(rows.map((r) => r.sku));
@@ -192,7 +229,7 @@ function listProducts({ limit = 50, offset = 0, search = '', filter = 'all' } = 
     items: rows.map((r) => {
       const d = JSON.parse(r.data);
       const listings = bySku[r.sku] || {};
-      for (const l of Object.values(listings)) l.outdated = l.last_hash !== r.hash;
+      for (const l of Object.values(listings)) l.outdated = l.last_hash !== syncHashOf(r);
       return {
         sku: r.sku, title: d.title, brand: d.brand, price: d.price, promoPrice: d.promoPrice, stock: d.stock,
         variants: (d.variants || []).length, images: d.images.length, videos: d.videos.length, active: d.active,
@@ -209,10 +246,10 @@ function listSync({ limit = 100, offset = 0, search = '', platform = '', status 
   const args = [like, like, like];
   if (platform) { where.push('l.platform = ?'); args.push(platform); }
   // Desatualizado = já publicado, mas o produto mudou na origem desde o último envio.
-  if (status === 'outdated') where.push(`l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != p.hash)`);
+  if (status === 'outdated') where.push(`l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != COALESCE(p.sync_hash, p.hash))`);
   else if (status) { where.push('l.status = ?'); args.push(status); }
   const w = where.join(' AND ');
-  const rows = all(`SELECT l.*, p.data, p.hash, p.updated_at AS product_updated_at,
+  const rows = all(`SELECT l.*, p.data, COALESCE(p.sync_hash, p.hash) AS hash, p.updated_at AS product_updated_at,
       (SELECT j.status || '|' || j.run_after FROM jobs j WHERE j.platform = l.platform AND j.sku = l.sku AND j.status IN ('queued','running') ORDER BY j.id DESC LIMIT 1) AS job
     FROM listings l JOIN products p ON p.sku = l.sku WHERE ${w}
     ORDER BY COALESCE(l.last_sync, l.selected_at, p.updated_at) DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
@@ -231,6 +268,43 @@ function listSync({ limit = 100, offset = 0, search = '', platform = '', status 
       };
     }),
   };
+}
+
+// ---------- precificação ----------
+function getPricing(sku) {
+  const row = get('SELECT * FROM pricing WHERE sku = ?', sku);
+  return row ? { ...row, watch: row.watch ? JSON.parse(row.watch) : [] } : null;
+}
+function pricingFor(skus) {
+  if (!skus.length) return {};
+  const rows = all(`SELECT * FROM pricing WHERE sku IN (${skus.map(() => '?').join(',')})`, ...skus);
+  return Object.fromEntries(rows.map((r) => [r.sku, { ...r, watch: r.watch ? JSON.parse(r.watch) : [] }]));
+}
+function setPricing(sku, fields) {
+  const cur = getPricing(sku) || { price: null, strategy: null, watch: [] };
+  const next = { ...cur, ...fields };
+  run(`INSERT INTO pricing(sku, price, strategy, watch, updated_at) VALUES(?, ?, ?, ?, ?)
+       ON CONFLICT(sku) DO UPDATE SET price = excluded.price, strategy = excluded.strategy,
+       watch = excluded.watch, updated_at = excluded.updated_at`,
+    sku, next.price ?? null, next.strategy ?? null, JSON.stringify(next.watch || []), now());
+  return refreshSyncHash(sku);
+}
+function getResearch(sku) {
+  const row = get('SELECT * FROM price_research WHERE sku = ?', sku);
+  return row ? { ...JSON.parse(row.data), collectedAt: row.collected_at } : null;
+}
+function researchFor(skus) {
+  if (!skus.length) return {};
+  const rows = all(`SELECT * FROM price_research WHERE sku IN (${skus.map(() => '?').join(',')})`, ...skus);
+  return Object.fromEntries(rows.map((r) => [r.sku, { ...JSON.parse(r.data), collectedAt: r.collected_at }]));
+}
+function saveResearch(sku, data) {
+  run(`INSERT INTO price_research(sku, data, collected_at) VALUES(?, ?, ?)
+       ON CONFLICT(sku) DO UPDATE SET data = excluded.data, collected_at = excluded.collected_at`, sku, JSON.stringify(data), now());
+}
+// Ligar/desligar o módulo muda o preço efetivo de todos os produtos com preço definido.
+function refreshAllSyncHashes() {
+  for (const r of all('SELECT sku FROM pricing')) refreshSyncHash(r.sku);
 }
 
 function deleteProduct(sku) {
@@ -278,7 +352,7 @@ function syncCounts() {
   const out = { total: 0, pending: 0, synced: 0, error: 0, skipped: 0, paused: 0, outdated: 0 };
   for (const r of all('SELECT status, COUNT(*) AS n FROM listings GROUP BY status')) { out[r.status] = r.n; out.total += r.n; }
   out.outdated = get(`SELECT COUNT(*) AS n FROM listings l JOIN products p ON p.sku = l.sku
-    WHERE l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != p.hash)`).n;
+    WHERE l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != COALESCE(p.sync_hash, p.hash))`).n;
   return out;
 }
 
@@ -369,7 +443,8 @@ module.exports = {
   open, close, now,
   getSetting, setSetting, getSecretSetting, setSecretSetting,
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
-  upsertProduct, getProduct, listProducts, listSync, deleteProduct,
+  upsertProduct, getProduct, listProducts, listSync, deleteProduct, refreshSyncHash, syncHashOf,
+  getPricing, pricingFor, setPricing, getResearch, researchFor, saveResearch, refreshAllSyncHashes,
   getListing, saveListing, listingStats, selectForPlatform, unselect, selectedSkus, syncCounts,
   enqueue, finishJob, resetStuckJobs, listJobs, jobStats, clearFinishedJobs,
   log, listLogs, jobsFor,

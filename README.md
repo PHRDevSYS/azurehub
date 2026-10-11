@@ -4,34 +4,48 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.2.0-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.3.0-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
 
+> **Projeto próprio e independente.** O AzureHub não tem vínculo, parceria ou
+> dependência com outros integradores ou plataformas (Bling, Shopify,
+> Plug4Market, entre outros). Eles serviram apenas de **referência** — consulta
+> à documentação pública, comparação de modelos e simulações nos testes. Os
+> conectores de origem são **adaptadores opcionais** que usam as APIs públicas
+> de cada plataforma: nenhum é obrigatório, e o hub funciona sozinho com um
+> banco de dados ou com a API própria (`POST /api/v1/products`). O mesmo vale
+> para o módulo de Precificação: as fontes de pesquisa são opcionais e
+> trocáveis.
+
 ## Como funciona
 
 ```
- ORIGEM                              AZUREHUB                              DESTINOS
- Bling (ERP) ─┐                                                       ┌─► Mercado Livre
- WooCommerce ─┤   captura    ┌──────────┐  seleção  ┌───────┐  fila   ├─► Shopee
- Shopify ─────┼────────────► │ Produtos │ ────────► │Prévia │ ──────► └─► TikTok Shop
- Nuvemshop ───┤  (manual ou  └──────────┘ (você     └───────┘ (envio,
- Banco SQL ───┤  automática)               escolhe)            reenvio,
- API (push) ──┘                                                atualização)
+ ORIGEM                                   AZUREHUB                                        DESTINOS
+ Bling (ERP) ─┐                                                                       ┌─► Mercado Livre
+ WooCommerce ─┤   captura    ┌──────────┐ seleção ┌──────────────┐     ┌───────┐ fila ├─► Shopee
+ Shopify ─────┼────────────► │ Produtos │ ──────► │ Precificação │ ──► │Prévia │ ───► └─► TikTok Shop
+ Nuvemshop ───┤  (manual ou  └──────────┘ (você   │  (opcional)  │     └───────┘ (envio,
+ Banco SQL ───┤  automática)              escolhe)└──────▲───────┘               reenvio,
+ API (push) ──┘                                          │ pesquisa de preços    atualização)
+                                                  lojas VTEX/Shopify/Woo, API do ML,
+                                                  páginas com JSON-LD, Scrapling
 ```
 
-O painel tem quatro telas:
+O painel tem quatro telas, mais a **Precificação** quando o módulo está ativo:
 
 | Tela | O que faz |
 |---|---|
 | **Integração** | **Origem:** escolha o ERP/site (Bling, WooCommerce, Shopify, Nuvemshop, banco de dados ou API própria), informe as credenciais, teste e capture. **Destino:** os 3 cards dos marketplaces (credenciais, conectar, testar, ativar). |
 | **Produtos** | Grade dos produtos capturados (SKU, título, preço/promoção, estoque, nº de variações, contagem de mídia, data de atualização e situação em cada destino). Selecione um ou vários, escolha os destinos e **pré-visualize** ou **envie para integração**. |
+| **Precificação** *(módulo opcional)* | Entre Produtos e Prévia. Compara o preço da origem com produtos similares pesquisados no mercado e define o **preço de venda** enviado aos marketplaces — por produto ou **em massa** (mínimo, médio, origem ou sugerido). Ver [Precificação](#precificação-módulo-opcional). |
 | **Prévia** | Como cada produto vai subir em cada marketplace — exatamente o que será enviado (título cortado, categoria, marca, atributos, GTIN, frete, promoção com a janela ajustada, variações…), com **erros** que bloqueiam e **avisos**. Nada é enviado nesta tela. |
 | **Sincronização** | Grade produto × destino com status, ID no marketplace (com link), preço, estoque, data/hora da atualização na origem e da última sincronização, mensagem e situação na fila. Ao clicar, o **detalhe completo**: fotos, vídeos, todos os dados, variações, destinos e histórico. Fila e log de eventos em abas. |
 
 ![Integração](docs/integracao.png)
 ![Produtos](docs/produtos.png)
+![Precificação](docs/precificacao.png)
 ![Prévia](docs/previa.png)
 ![Sincronização](docs/sincronizacao.png)
 ![Detalhe](docs/detalhe.png)
@@ -52,6 +66,91 @@ Regras do fluxo:
 5. **Prévia** usa a conta conectada só com **endpoints de leitura** (categoria,
    atributos, marcas, limites, frete); sem conta, aplica as regras fixas de cada
    marketplace. Fotos e vídeos só são exibidos no detalhe da Sincronização.
+
+## Precificação (módulo opcional)
+
+Ative em **Integração › Módulos › Precificação**. A tela aparece entre
+*Produtos* e *Prévia*: selecione produtos em *Produtos* e clique em
+**Precificar** (sem seleção, a tela mostra os 200 mais recentes).
+
+![Precificação: ofertas](docs/precificacao-ofertas.png)
+
+### Os valores de cada produto
+
+| Valor | Como é calculado |
+|---|---|
+| **Origem** | Preço praticado na origem (o promocional, se houver; com variações, a mais barata). É o **teto**: nenhuma referência passa dele. |
+| **Mínimo** | Menor preço válido encontrado no mercado (o valor "raspado"). |
+| **Médio** | Ponto intermediário entre o mínimo do mercado e a origem. |
+| **Sugerido** | Mediana do mercado menos um desconto (padrão 3%), arredondada **para baixo** (final ,90, ,99 ou centavos). Se o mercado estiver acima da origem, fica a origem. |
+| **Piso** | Proteção da margem: o maior entre *origem − desconto máximo* (padrão 30%) e *custo + margem mínima* (padrão 10%, quando a origem informa o custo — Bling, Nuvemshop, banco ou API com `cost`). Mínimo, médio e sugerido nunca ficam abaixo do piso (⚑ na grade). |
+
+Na grade, um clique em um valor aplica aquela referência ao produto; com
+vários marcados, a barra **Aplicar em massa** aplica *Mínimo*, *Médio*,
+*Origem* ou *Sugerido* a todos. O campo **Preço de venda** aceita um valor
+manual (avisa se estiver abaixo do piso ou acima da origem). **Limpar preço**
+volta a usar a origem.
+
+**Como o preço chega aos marketplaces:** o preço de venda substitui o preço da
+origem no envio (variações recebem o mesmo ajuste, proporcional). Com
+*Enviar origem como preço "de"*, a origem vai como preço cheio e o preço de
+venda como promoção. Mudar o preço de um produto já publicado o deixa
+**desatualizado** e coloca o reenvio na fila; desligar o módulo devolve todos
+ao preço da origem (também com reenvio).
+
+### Fontes de pesquisa
+
+Cadastradas em **Precificação › Fontes e regras** (várias de cada tipo):
+
+| Fonte | Como pesquisa |
+|---|---|
+| **Mercado Livre (API oficial)** | Catálogo (`/products/search` por GTIN ou texto → `/products/{id}/items`) e, sem resultado, a busca de anúncios — com o token da conta conectada no destino Mercado Livre. A busca pública sem token responde 403. |
+| **Loja VTEX** | API pública de busca do catálogo (`ft=` texto, `fq=alternateIds_Ean:` GTIN); só sellers com estoque. |
+| **Loja Shopify** | Busca preditiva pública (`/search/suggest.json`), sem produtos esgotados. |
+| **Loja WooCommerce** | Store API pública (`/wp-json/wc/store/v1/products`), sem autenticação. |
+| **Site (dados estruturados)** | Página de busca ou de produto com JSON-LD schema.org (`Product`/`Offer`/`AggregateOffer`/`ItemList`) ou metatags de preço — o que as lojas publicam para os buscadores. Não depende do layout. |
+| **Site por seletores CSS (Scrapling)** | Para páginas sem dados estruturados: você informa os seletores CSS e o trabalhador Python ([Scrapling](https://github.com/D4Vinci/Scrapling)) extrai título, preço e link. Opção de navegador para páginas que dependem de JavaScript. |
+| **URLs monitoradas** | Por produto (no detalhe da linha): páginas de concorrentes que vendem **o mesmo item**; entram com similaridade 100%. |
+
+**Como as ofertas são escolhidas:** busca primeiro pelo **GTIN** (quando o
+produto tem) e, sem resultado, pelo título + marca. Cada oferta recebe uma
+nota de similaridade (palavras em comum, marca, e números do título — `1L` ≠
+`500ml`); abaixo do mínimo configurado (padrão 45%) é descartada, assim como
+produtos **usados** (pela condição ou pelo título: "usado", "seminovo",
+"vitrine"…) e preços **fora da curva** (abaixo de 40% ou acima de 250% da
+mediana: acessórios, kits, erros). O detalhe mostra todas as ofertas, com o
+motivo de cada descarte, e a situação de cada fonte.
+
+### Coleta responsável
+
+- O robô se identifica pelo User-Agent `AzureHubPriceBot/<versão> (+<PUBLIC_URL>; pesquisa de precos)`.
+- Respeita o `robots.txt` de cada site (como o `ROBOTSTXT_OBEY` do
+  [Scrapy](https://github.com/scrapy/scrapy)): regra mais específica vence;
+  `robots.txt` fora do ar (5xx) bloqueia. Desligue por fonte só em sites seus
+  ou com autorização expressa.
+- Espera entre requisições ao mesmo site (1,5 a 3 s; configurável por fonte)
+  e guarda as respostas em cache (padrão 12 h).
+- **Não** contorna captcha, login, *paywall* ou bloqueios anti-robô: os
+  recursos de disfarce do Scrapling (cabeçalhos *stealth*, referer do Google,
+  `StealthyFetcher`) ficam desligados. Prefira APIs públicas e use só fontes
+  cujos termos de uso permitam a consulta.
+- O preço da busca pode não incluir frete, desconto no Pix ou cupom: trate o
+  mercado como referência, não como verdade.
+
+### Scrapling (opcional)
+
+Só a fonte *Site por seletores CSS* precisa de Python. No servidor:
+
+```bash
+python3 -m venv /opt/azurehub-scraper
+/opt/azurehub-scraper/bin/pip install "scrapling[fetchers]"   # Python 3.10+
+/opt/azurehub-scraper/bin/scrapling install                   # só para o modo navegador
+echo 'PRICE_SCRAPER_CMD=/opt/azurehub-scraper/bin/python' >> .env
+```
+
+O Node verifica o `robots.txt` e o intervalo, chama `scraper/scrapling_worker.py`
+(JSON na entrada e na saída) e trata o resultado. A imagem Docker não traz
+Python: para usar esta fonte em Docker, estenda a imagem.
 
 ## Origens de produtos
 
@@ -77,6 +176,8 @@ na tela: `<PUBLIC_URL>/oauth/source/<origem>/callback`.
 - Para ler o banco do site: `mysql2` (MySQL/MariaDB) ou `pg` (PostgreSQL). Os
   dois são instalados pelo `npm install` (são opcionais: se um falhar, o hub
   continua funcionando para os outros tipos).
+- Opcional, só para a fonte *Site por seletores CSS* da Precificação:
+  **Python 3.10+** com Scrapling (ver [Scrapling](#scrapling-opcional)).
 - Em produção: **HTTPS** com URL pública (as três plataformas exigem HTTPS no
   retorno do OAuth) e fotos/vídeos em **URLs públicas**.
 
@@ -141,6 +242,7 @@ Atrás do nginx, publique com `proxy_pass http://127.0.0.1:3900;`.
 | `HUB_DATA_DIR` | `data` | Pasta do banco interno |
 | `MAX_MEDIA_MB` | `100` | Tamanho máximo de foto/vídeo baixado |
 | `SESSION_HOURS` | `12` | Duração da sessão do painel |
+| `PRICE_SCRAPER_CMD` | `python3` | Python usado pela fonte Scrapling da Precificação (ex.: `/opt/azurehub-scraper/bin/python`) |
 
 ## Destinos (marketplaces)
 
@@ -275,6 +377,7 @@ Formato do produto:
   "promoPrice": 69.90,
   "promoStart": "2026-11-01T00:00:00-03:00",
   "promoEnd": "2026-11-30T23:59:59-03:00",
+  "cost": 42.00,
   "stock": 25,
   "weightKg": 0.3, "lengthCm": 30, "widthCm": 25, "heightCm": 3,
   "images": ["https://meusite.com/img/1.jpg"],
@@ -296,6 +399,9 @@ Formato do produto:
 Obrigatórios: `sku`, `title`, `price > 0` e ao menos 1 imagem. A resposta traz
 `received`, `changed`, `unchanged` e `invalid` (com o motivo de cada um).
 
+- `cost` (opcional): custo do produto. Só é usado pela Precificação, para o
+  piso de margem mínima; nunca é enviado aos marketplaces. No banco, as
+  colunas `cost`, `custo` ou `preco_custo`.
 - `attributes`: a chave é o **nome** (ou id) do atributo na plataforma e o
   valor é o nome (ou id) da opção. Quando falta um atributo obrigatório, o log
   diz qual é e lista as opções.
@@ -336,6 +442,7 @@ src/
   server.js              servidor HTTP (sem Express) + arquivos do painel
   config.js              .env e caminhos
   routes/api.js          instalação, login, origem, destinos, produtos, prévia, sincronização, OAuth
+  routes/pricing.js      módulo de Precificação
   lib/store.js           banco interno (node:sqlite): produtos, vínculos, fila, logs
   lib/crypto.js          cofre AES-GCM, scrypt, HMAC
   lib/media.js           cliente HTTP comum + download de fotos/vídeos
@@ -344,18 +451,24 @@ src/
   platforms/             mercadolivre.js, shopee.js, tiktok.js (publicação + prévia)
   sync/engine.js         fila, reenvio com backoff, captura automática
   sync/preview.js        prévia produto × destino
-public/                  painel: Integração, Produtos, Prévia, Sincronização
+  pricing/               regras de preço, pesquisa em segundo plano, similaridade, HTTP educado
+    sources/             mercadolivre, vtex/shopify/woocommerce, html (JSON-LD), scrapling
+scraper/                 trabalhador Python opcional (Scrapling)
+public/                  painel: Integração, Produtos, Precificação, Prévia, Sincronização
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` — 66 casos: conectores de origem (Bling, WooCommerce,
+Testes: `npm test` — 82 casos: conectores de origem (Bling, WooCommerce,
 Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
 prévia → envio → sincronização → pausa), publicação e prévia nas três
 plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
 obrigatório, foto por cor, tabela de medidas), **roupa** (tamanho
 padronizado/livre, marca desconhecida, GTIN "00") e **utensílio doméstico**
 (atributos com unidade/data, pré-venda, NCM, canal por peso) —, backoff e
-falha parcial.
+falha parcial; e a Precificação: similaridade, `robots.txt`, cada fonte de
+pesquisa com respostas simuladas (inclusive o trabalhador Scrapling), regras
+de piso/teto/arredondamento, aplicação em massa, preço efetivo no envio e
+reenvio automático dos produtos já publicados.
 
 ## Antes de ir para produção
 
@@ -376,6 +489,11 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
 - [ ] Shopee: canais de frete `SIZE_SELECTION`/`CUSTOM_PRICE` (exigem tamanho ou valor por produto) e produtos de lojas cross-border CNSC/KRSC (API de produto global).
 - [ ] Declarar o IP da VPS no IP Address Whitelist da Shopee antes de produção.
 - [ ] Shopify com catálogo muito grande: trocar a paginação por *bulk operations*.
+- [ ] **Precificação:** validar as fontes do Mercado Livre com o app real (o
+      ML restringe `/products/search` e `/sites/MLB/search` por aplicativo) e
+      revisar os termos de uso de cada loja cadastrada como fonte.
+- [ ] **Precificação:** pesquisa agendada (hoje é sob demanda) e histórico de
+      preços por produto.
 - [ ] Hospedagem: subir na VPS com HTTPS (ex.: `https://azuresystem.com.br/azurehub`).
 
 Documentação de referência:
@@ -385,4 +503,8 @@ Documentação de referência:
 [Bling](https://developer.bling.com.br/) · [WooCommerce](https://woocommerce.github.io/woocommerce-rest-api-docs/) ·
 [Shopify](https://shopify.dev/docs/api/admin-graphql) · [Nuvemshop](https://tiendanube.github.io/api-documentation/intro) ·
 [Plug4Market](https://api.plug4market.com.br/docs) (referência de modelo de hub) ·
-[projetos no GitHub](https://github.com/topics/api-mercado-livre).
+[projetos no GitHub](https://github.com/topics/api-mercado-livre) ·
+Precificação: [Scrapling](https://github.com/D4Vinci/Scrapling) ·
+[Scrapy](https://github.com/scrapy/scrapy) · [ferramentas de scraping](https://github.com/topics/scraping-tools) ·
+[schema.org/Product](https://schema.org/Product). Todas apenas como
+referência — o AzureHub não depende de nenhuma delas.

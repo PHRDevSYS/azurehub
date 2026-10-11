@@ -5,6 +5,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund || true
 COPY src ./src
 COPY public ./public
+COPY scraper ./scraper
 VOLUME ["/data"]
 EXPOSE 3900
 USER node

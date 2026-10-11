@@ -29,6 +29,7 @@ pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px
 .badge.err { background: color-mix(in srgb, var(--err) 18%, transparent); color: var(--err); }
 
 main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+main.wide { max-width: 1440px; }
 h1 { font-size: 24px; margin: 0 0 4px; }
 h2 { font-size: 18px; margin: 32px 0 12px; }
 
@@ -180,6 +181,22 @@ td img.thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 6px;
 .fld .help { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .fld label.switch { margin-top: 18px; }
 td.prod { min-width: 220px; }
+
+/* ---------- precificação ---------- */
+td .sub.sale { color: var(--ok); font-weight: 600; }
+.legend { margin-top: 0; line-height: 1.6; }
+.pick { padding: 4px 9px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pick small { color: var(--warn); }
+.pick.on { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--surface)); color: var(--primary); }
+.price-in { width: 116px; padding: 6px 8px; text-align: right; font-variant-numeric: tabular-nums; }
+td.up, .sub.up { color: var(--warn); }
+td.down, .sub.down { color: var(--ok); }
+.src-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px 14px; margin-bottom: 10px; }
+.src-card header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.src-card header small { display: block; }
+.src-card .fld label { margin-top: 10px; }
+.src-card .fld label.switch { margin-top: 16px; }
+@media (max-width: 760px) { .actionbar .targets { align-items: center; } }
 @media (max-width: 760px) {
   .top { padding: 10px 16px; }
   .brand { flex: 1; }

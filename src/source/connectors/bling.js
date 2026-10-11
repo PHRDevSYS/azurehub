@@ -57,6 +57,7 @@ function mapProduct(d) {
     gtin: d.gtin || null,
     condition: d.condicao === 2 ? 'used' : 'new',
     price: d.preco,
+    cost: (d.fornecedor && (d.fornecedor.precoCusto || d.fornecedor.precoCompra)) || null,
     stock: Math.max(0, Math.trunc(Number((d.estoque || {}).saldoVirtualTotal) || 0)),
     weightKg: toKg(d.pesoBruto || d.pesoLiquido, 'kg'),
     lengthCm: toCm(dim.profundidade, unit), widthCm: toCm(dim.largura, unit), heightCm: toCm(dim.altura, unit),

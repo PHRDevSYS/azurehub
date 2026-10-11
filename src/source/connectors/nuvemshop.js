@@ -42,6 +42,7 @@ function mapProduct(p, cfg) {
     brand: p.brand || null,
     images: images.map((i) => i.src),
     videos: p.video_url ? [p.video_url] : [],
+    cost: first.cost || null,
     weightKg: toKg(first.weight, 'kg'),
     lengthCm: toCm(first.depth, 'cm'), widthCm: toCm(first.width, 'cm'), heightCm: toCm(first.height, 'cm'),
     active: p.published !== false,

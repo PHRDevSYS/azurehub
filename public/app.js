@@ -11,6 +11,7 @@ const safeUrl = (u) => (/^https?:\/\//i.test(String(u || '')) ? String(u) : '#')
 
 const PLAT = { mercadolivre: 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok Shop' };
 const PLAT_SHORT = { mercadolivre: 'ML', shopee: 'Shopee', tiktok: 'TikTok' };
+const STRATEGY = { minimo: 'mínimo', medio: 'médio', origem: 'origem', sugerido: 'sugerido', manual: 'manual' };
 const STATUS = {
   pending: ['Aguardando', 'info'], synced: ['Sincronizado', 'ok'], error: ['Erro', 'err'],
   skipped: ['Adiado', 'warn'], paused: ['Pausado', ''],
@@ -23,6 +24,8 @@ const state = {
   products: { items: [], total: 0, q: '', filter: 'all' },
   sync: { q: '', platform: '', status: '', auto: true, picked: new Set(), tab: 'grade' },
   preview: null,                // { key, items, include, tab }
+  modules: { pricing: false },  // módulos opcionais ativos
+  pricing: { picked: new Set(), sel: new Set(), rows: [], poll: null, q: '', filter: 'all' }, // picked = escopo vindo de Produtos
 };
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -258,7 +261,7 @@ function showLogin() {
 }
 
 // =============================================================== rotas
-const VIEWS = { integracao: viewIntegracao, produtos: viewProdutos, previa: viewPrevia, sincronizacao: viewSincronizacao };
+const VIEWS = { integracao: viewIntegracao, produtos: viewProdutos, precificacao: viewPrecificacao, previa: viewPrevia, sincronizacao: viewSincronizacao };
 let refreshTimer = null;
 
 function startApp(view) {
@@ -272,9 +275,13 @@ async function route() {
   const view = VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : 'produtos';
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.view === view));
   clearInterval(refreshTimer);
+  clearInterval(state.pricing.poll);
+  state.pricing.poll = null;
+  $app.classList.toggle('wide', view === 'precificacao');
   $app.innerHTML = '<p class="muted center">Carregando…</p>';
   try {
-    state.platforms = await api('/api/platforms');
+    [state.platforms, state.modules] = await Promise.all([api('/api/platforms'), api('/api/modules')]);
+    document.getElementById('nav-pricing').classList.toggle('hidden', !state.modules.pricing);
     await VIEWS[view]();
   } catch (e) {
     if (!/Sessão|Faça login/.test(e.message)) $app.innerHTML = `<p class="lvl-error">${esc(e.message)}</p>`;
@@ -318,6 +325,14 @@ async function viewIntegracao() {
       <h2>2. Destinos (marketplaces)</h2>
       <p class="muted">Configure as credenciais, conecte a conta e deixe <b>Ativo</b> os marketplaces que vão receber produtos.</p>
       <div class="cards" id="cards"></div>
+    </section>
+    <section class="block panel">
+      <h2>3. Módulos</h2>
+      <div class="status-line">
+        <label class="switch"><input type="checkbox" id="mod-pricing" ${state.modules.pricing ? 'checked' : ''}> <b>Precificação</b></label>
+        <span class="muted">Compara o preço de origem com produtos similares no mercado e define o preço de venda. Fica entre Produtos e Prévia.</span>
+        ${state.modules.pricing ? '<a href="#precificacao">Abrir Precificação</a>' : ''}
+      </div>
     </section>`;
 
   const root = document.getElementById('src');
@@ -351,6 +366,13 @@ async function viewIntegracao() {
     await viewIntegracao();
   });
   if (current === 'api') renderApiBox(document.getElementById('api-box'));
+  document.getElementById('mod-pricing').onchange = async (e) => {
+    try {
+      const r = await api('/api/pricing/settings', { method: 'PUT', body: { enabled: e.target.checked } });
+      toast(`Precificação ${e.target.checked ? 'ativada' : 'desativada'}${r.queued ? ` · ${r.queued} reenvio(s) na fila` : ''}`);
+      route();
+    } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+  };
   await renderCards();
 }
 
@@ -494,7 +516,7 @@ function drawProducts() {
       <td><input type="checkbox" class="chk" ${state.selected.has(p.sku) ? 'checked' : ''}></td>
       <td class="nowrap">${esc(p.sku)}</td>
       <td class="prod">${esc(p.title)}<span class="sub">${esc([p.brand, p.active ? null : 'inativo na origem'].filter(Boolean).join(' · '))}</span></td>
-      <td class="num">${p.promoPrice ? `<span class="strike">${money(p.price)}</span>${money(p.promoPrice)}` : money(p.price)}</td>
+      <td class="num">${p.promoPrice ? `<span class="strike">${money(p.price)}</span>${money(p.promoPrice)}` : money(p.price)}${p.salePrice ? `<span class="sub sale">venda ${money(p.salePrice)}</span>` : ''}</td>
       <td class="num">${p.stock}</td><td class="num">${p.variants || '—'}</td>
       <td class="nowrap">${p.images} foto${p.images === 1 ? "" : "s"}${p.videos ? ` · ${p.videos} vídeo${p.videos > 1 ? 's' : ''}` : ''}</td>
       <td class="nowrap">${when(p.updatedAt)}</td>
@@ -535,6 +557,7 @@ function drawActionBar() {
     <div class="targets">${targetToggles()}</div>
     <button id="b-clear" class="ghost">Limpar</button>
     <button id="b-stop" class="ghost danger">Parar de sincronizar</button>
+    ${state.modules.pricing ? '<button id="b-pricing">Precificar</button>' : ''}
     <button id="b-preview">Pré-visualizar</button>
     <button id="b-send" class="primary">Enviar para integração</button></div>`;
   bar.querySelectorAll('[data-target]').forEach((c) => {
@@ -542,6 +565,8 @@ function drawActionBar() {
   });
   bar.querySelector('#b-clear').onclick = () => { state.selected.clear(); drawProducts(); };
   bar.querySelector('#b-preview').onclick = () => { state.preview = null; location.hash = 'previa'; };
+  const bp = bar.querySelector('#b-pricing');
+  if (bp) bp.onclick = () => { state.pricing.picked = new Set(state.selected); location.hash = 'precificacao'; };
   bar.querySelector('#b-send').onclick = (e) => busy(e.target, async () => {
     const targets = [...state.targets];
     if (!targets.length) throw new Error('Escolha ao menos um destino disponível');
@@ -556,6 +581,405 @@ function drawActionBar() {
     await api('/api/integrations/stop', { method: 'POST', body: { skus: [...state.selected], platforms: [...state.targets] } });
     toast('Sincronização interrompida');
     await loadProducts(true);
+  });
+}
+
+// ========================================================= Precificação
+// Fica entre Produtos e Prévia quando o módulo está ativo. Compara a origem
+// (teto) com o mercado e define o preço de venda, por produto ou em massa.
+const brNum = (v) => Number(v).toFixed(2).replace('.', ',');
+// "1.234,56", "1234,56" e "1234.56" → 1234.56
+const parseBr = (v) => { const t = String(v).trim().replace(/[R$\s]/g, ''); return Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t); };
+const pct = (v) => `${v > 0 ? '+' : ''}${Number(v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%`;
+const PZ_FILTERS = [['all', 'Todos'], ['none', 'Sem pesquisa'], ['defined', 'Com preço definido'], ['undefined', 'Sem preço definido'], ['above', 'Acima da mediana'], ['below', 'Na mediana ou abaixo']];
+
+async function viewPrecificacao() {
+  const pz = state.pricing;
+  if (!state.modules.pricing) {
+    $app.innerHTML = `<div class="view-head"><div><h1>Precificação</h1></div></div>
+      <div class="panel empty">O módulo de Precificação está inativo. Ative em <a href="#integracao">Integração › Módulos</a>.</div>`;
+    return;
+  }
+  $app.innerHTML = `
+    <div class="view-head">
+      <div><h1>Precificação</h1><p class="muted">Compare o preço da origem com produtos similares no mercado e defina o preço de venda enviado aos marketplaces.</p>
+      <p class="muted" id="pz-scope"></p></div>
+      <div class="toolbar" style="margin:0">
+        <a href="#produtos" class="btn-link">Voltar para Produtos</a>
+        <button id="pz-settings">Fontes e regras</button>
+        <button id="pz-research" class="primary">Pesquisar preços</button>
+      </div>
+    </div>
+    <div id="pz-rules" class="callout legend"></div>
+    <div id="pz-status" class="status-line" style="margin:12px 0 4px"></div>
+    <div class="progress hidden" id="pz-prog"><i style="width:0"></i></div>
+    <div class="toolbar" style="margin-top:12px">
+      <input id="pz-q" placeholder="Filtrar SKU, título ou marca" value="${esc(pz.q || '')}">
+      <select id="pz-filter" style="max-width:220px">${PZ_FILTERS.map(([v, l]) => `<option value="${v}" ${pz.filter === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <span class="muted" id="pz-count"></span>
+    </div>
+    <div class="table-wrap"><table id="pz-grid"></table></div>
+    <div id="pz-bar"></div>
+    <div class="actions"><button id="pz-next" class="primary">Continuar para Prévia</button></div>`;
+  document.getElementById('pz-settings').onclick = () => openPricingSettings();
+  document.getElementById('pz-research').onclick = () => startResearch(pz.sel.size ? [...pz.sel] : pz.rows.map((r) => r.sku));
+  let t;
+  document.getElementById('pz-q').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { pz.q = e.target.value; drawPricing(); }, 250); };
+  document.getElementById('pz-filter').onchange = (e) => { pz.filter = e.target.value; drawPricing(); };
+  document.getElementById('pz-next').onclick = () => {
+    const next = pz.sel.size ? pz.sel : pz.picked;
+    if (!next.size) { toast('Marque os produtos que vão para a Prévia', true); return; }
+    state.selected = new Set(next);
+    state.preview = null;
+    location.hash = 'previa';
+  };
+  await loadPricing();
+}
+
+async function loadPricing() {
+  const pz = state.pricing;
+  const skus = [...pz.picked];
+  const data = await api(`/api/pricing${skus.length ? `?skus=${encodeURIComponent(skus.join(','))}` : ''}`);
+  pz.rows = data.items;
+  pz.settings = data.settings;
+  pz.sources = data.sources;
+  for (const sku of [...pz.sel]) if (!pz.rows.some((r) => r.sku === sku)) pz.sel.delete(sku);
+  if (!document.getElementById('pz-grid')) return;
+  const cfg = data.settings;
+  document.getElementById('pz-scope').innerHTML = skus.length
+    ? `Escopo: <b>${pz.rows.length}</b> produto(s) escolhidos em Produtos · <a href="#" id="pz-all">ver todos</a>`
+    : `Escopo: os <b>${pz.rows.length}</b> produtos mais recentes. Para restringir, selecione em <a href="#produtos">Produtos</a> e clique em <b>Precificar</b>.`;
+  const all = document.getElementById('pz-all');
+  if (all) all.onclick = (e) => { e.preventDefault(); pz.picked.clear(); pz.sel.clear(); loadPricing(); };
+  const round = { 90: 'final ,90', 99: 'final ,99', cent: 'centavos' }[cfg.rounding] || cfg.rounding;
+  document.getElementById('pz-rules').innerHTML = `
+    <b>Origem</b> = preço praticado na origem (teto) · <b>Mínimo</b> = menor preço encontrado no mercado ·
+    <b>Médio</b> = meio-termo entre o mínimo e a origem · <b>Sugerido</b> = mediana do mercado − ${esc(cfg.undercutPct)}%, ${esc(round)}.
+    Nenhum valor fica abaixo do <b>piso</b> (origem − ${esc(cfg.maxDiscountPct)}% ou custo + ${esc(cfg.minMarginPct)}%, o maior).
+    ${cfg.showOriginAsList ? '<br>Envio: origem como preço “de” e o preço de venda como “por” (promoção).' : ''}
+    ${data.sources.active ? '' : '<br><span class="lvl-warn">Nenhuma fonte de pesquisa ativa — cadastre em <b>Fontes e regras</b>.</span>'}`;
+  drawResearchStatus(data.research);
+  drawPricing();
+  if (data.research.running && !pz.poll) pollResearch();
+}
+
+function pzVisible() {
+  const pz = state.pricing;
+  const q = (pz.q || '').trim().toLowerCase();
+  return pz.rows.filter((r) => {
+    if (q && ![r.sku, r.title, r.brand].some((v) => String(v || '').toLowerCase().includes(q))) return false;
+    switch (pz.filter) {
+      case 'none': return !r.collectedAt;
+      case 'defined': return r.price !== null;
+      case 'undefined': return r.price === null;
+      case 'above': return r.belowMarket === false;
+      case 'below': return r.belowMarket === true;
+      default: return true;
+    }
+  });
+}
+
+// Botão de um valor de referência: um clique aplica a estratégia ao produto.
+function pickBtn(r, key) {
+  const v = r.values[key];
+  if (v.price === null) return `<span class="muted" title="${esc(v.note || '')}">—</span>`;
+  const on = r.price !== null && r.strategy === key;
+  return `<button class="pick ${on ? 'on' : ''}" data-apply="${key}" title="${esc(`Aplicar ${STRATEGY[key]} neste produto${v.note ? ` — ${v.note}` : ''}`)}">${money(v.price)}${v.clamped ? '<small> ⚑</small>' : ''}</button>`;
+}
+const pickCell = (r, key) => `<td class="num">${pickBtn(r, key)}</td>`;
+
+function drawPricing() {
+  const pz = state.pricing;
+  const grid = document.getElementById('pz-grid');
+  if (!grid) return;
+  const rows = pzVisible();
+  const allOn = rows.length && rows.every((r) => pz.sel.has(r.sku));
+  const researched = pz.rows.filter((r) => r.collectedAt).length;
+  const defined = pz.rows.filter((r) => r.price !== null).length;
+  const above = pz.rows.filter((r) => r.belowMarket === false).length;
+  document.getElementById('pz-status').innerHTML = `<span><b>${pz.rows.length}</b> produtos</span>
+    <span class="badge info">${researched} pesquisados</span><span class="badge ok">${defined} com preço definido</span>
+    ${above ? `<span class="badge warn">${above} acima da mediana do mercado</span>` : ''}`;
+  document.getElementById('pz-count').textContent = rows.length === pz.rows.length ? '' : `${rows.length} de ${pz.rows.length} exibidos`;
+  grid.innerHTML = `
+    <tr><th><input type="checkbox" class="chk" id="pz-allchk" ${allOn ? 'checked' : ''} title="Selecionar todos exibidos"></th>
+    <th>Produto</th><th class="num">Origem</th><th class="num">Mercado</th><th class="num">Mínimo</th><th class="num">Médio</th><th class="num">Sugerido</th>
+    <th class="num">Preço de venda</th><th class="num">Δ origem</th><th>Pesquisado</th></tr>
+    ${rows.map((r) => {
+      const m = r.market;
+      const mk = m ? `${money(m.min)} – ${money(m.max)}<span class="sub">mediana ${money(m.median)} · ${m.count} oferta${m.count > 1 ? 's' : ''}</span>`
+        : `<span class="muted">${r.collectedAt ? 'sem ofertas' : 'não pesquisado'}</span>`;
+      const fail = r.sourcesFailed.length ? `<span class="sub lvl-warn" title="${esc(r.sourcesFailed.join('\n'))}">${r.sourcesFailed.length} fonte(s) com falha</span>` : '';
+      const mkt = r.belowMarket === null ? '' : r.belowMarket ? '<span class="sub down">≤ mediana</span>' : '<span class="sub up">acima da mediana</span>';
+      return `<tr class="clickable ${pz.sel.has(r.sku) ? 'sel' : ''}" data-sku="${esc(r.sku)}">
+        <td><input type="checkbox" class="chk" ${pz.sel.has(r.sku) ? 'checked' : ''}></td>
+        <td class="prod">${esc(r.title)}<span class="sub">${esc([r.sku, r.brand, r.variants ? `${r.variants} variações` : null, r.active ? null : 'inativo na origem'].filter(Boolean).join(' · '))}</span></td>
+        <td class="num">${pickBtn(r, 'origem')}<span class="sub" title="Piso: menor preço permitido pelas regras">piso ${money(r.floor)}${r.cost ? ` · custo ${money(r.cost)}` : ''}</span></td>
+        <td class="num">${mk}${fail}</td>
+        ${pickCell(r, 'minimo')}${pickCell(r, 'medio')}${pickCell(r, 'sugerido')}
+        <td class="num"><input class="price-in" inputmode="decimal" value="${r.price === null ? '' : brNum(r.price)}" placeholder="${esc(brNum(r.origin))}" aria-label="Preço de venda de ${esc(r.sku)}">
+          <span class="sub">${r.price === null ? 'usa a origem' : `<span class="badge ${r.strategy === 'manual' ? 'warn' : 'info'}">${esc(STRATEGY[r.strategy] || r.strategy)}</span>`}</span></td>
+        <td class="num ${r.diffPct < 0 ? 'down' : r.diffPct > 0 ? 'up' : ''}">${r.price === null ? '—' : pct(r.diffPct)}${mkt}</td>
+        <td class="nowrap">${when(r.collectedAt)}${r.watch ? `<span class="sub">${r.watch} URL monitorada${r.watch > 1 ? 's' : ''}</span>` : ''}</td></tr>`;
+    }).join('') || `<tr><td colspan="10" class="empty">${pz.rows.length ? 'Nenhum produto neste filtro.' : 'Nenhum produto capturado. Configure a origem em Integração.'}</td></tr>`}`;
+  document.getElementById('pz-allchk').onchange = (e) => {
+    rows.forEach((r) => (e.target.checked ? pz.sel.add(r.sku) : pz.sel.delete(r.sku)));
+    drawPricing();
+  };
+  grid.querySelectorAll('tr[data-sku]').forEach((tr) => {
+    const sku = tr.dataset.sku;
+    tr.querySelector('.chk').onclick = (e) => {
+      e.stopPropagation();
+      if (e.target.checked) pz.sel.add(sku); else pz.sel.delete(sku);
+      tr.classList.toggle('sel', e.target.checked);
+      drawPricingBar();
+    };
+    tr.querySelectorAll('[data-apply]').forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); busy(b, () => applyPricing([sku], b.dataset.apply)); };
+    });
+    const inp = tr.querySelector('.price-in');
+    inp.onclick = (e) => e.stopPropagation();
+    inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
+    inp.onchange = () => setManualPrice(sku, inp.value);
+    tr.onclick = () => openPricingDetail(sku);
+  });
+  drawPricingBar();
+}
+
+function drawPricingBar() {
+  const pz = state.pricing;
+  const bar = document.getElementById('pz-bar');
+  if (!bar) return;
+  const n = pz.sel.size;
+  if (!n) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `<div class="actionbar"><b>${n} selecionado${n > 1 ? 's' : ''}</b>
+    <div class="targets"><span class="muted">Aplicar em massa:</span>
+      ${['minimo', 'medio', 'origem', 'sugerido'].map((k) => `<button data-bulk="${k}">${k === 'sugerido' ? 'Sugerido' : STRATEGY[k][0].toUpperCase() + STRATEGY[k].slice(1)}</button>`).join('')}</div>
+    <button id="pz-unsel" class="ghost">Desmarcar</button>
+    <button id="pz-clear" class="ghost danger" title="Volta a usar o preço da origem">Limpar preço</button>
+    <button id="pz-res-sel">Pesquisar selecionados</button></div>`;
+  bar.querySelectorAll('[data-bulk]').forEach((b) => { b.onclick = () => busy(b, () => applyPricing([...pz.sel], b.dataset.bulk)); });
+  bar.querySelector('#pz-unsel').onclick = () => { pz.sel.clear(); drawPricing(); };
+  bar.querySelector('#pz-clear').onclick = (e) => busy(e.target, async () => {
+    if (!confirm(`Remover o preço definido de ${n} produto(s)? Eles voltam a ser enviados pelo preço da origem.`)) return;
+    const r = await api('/api/pricing/clear', { method: 'POST', body: { skus: [...pz.sel] } });
+    toast(`Preço removido${r.queued ? ` · ${r.queued} reenvio(s) na fila` : ''}`);
+    await loadPricing();
+  });
+  bar.querySelector('#pz-res-sel').onclick = () => startResearch([...pz.sel]);
+}
+
+async function applyPricing(skus, strategy) {
+  const r = await api('/api/pricing/apply', { method: 'POST', body: { skus, strategy } });
+  const skipped = r.skipped.length ? ` · ${r.skipped.length} sem dados de mercado` : '';
+  toast(`${STRATEGY[strategy]} aplicado a ${r.applied} produto(s)${skipped}${r.queued ? ` · ${r.queued} reenvio(s) na fila` : ''}`, !r.applied);
+  await loadPricing();
+  if (document.getElementById('drawer').open && skus.length === 1) openPricingDetail(skus[0]);
+}
+
+async function setManualPrice(sku, value) {
+  try {
+    if (String(value).trim() === '') {
+      await api('/api/pricing/clear', { method: 'POST', body: { skus: [sku] } });
+      toast('Preço removido: volta a usar a origem');
+    } else {
+      const price = parseBr(value);
+      if (!(price > 0)) throw new Error('Preço inválido: use o formato 129,90');
+      const r = await api('/api/pricing/manual', { method: 'POST', body: { sku, price } });
+      toast(`Preço de ${sku}: ${money(r.price)}${r.warnings.length ? ` — atenção: ${r.warnings.join('; ')}` : ''}`, r.warnings.length > 0);
+    }
+  } catch (e) { toast(e.message, true); }
+  await loadPricing();
+}
+
+// Sem busy(): o botão principal mostra o progresso enquanto a pesquisa roda.
+async function startResearch(skus) {
+  try {
+    if (!skus.length) throw new Error('Nenhum produto para pesquisar');
+    const st = await api('/api/pricing/research', { method: 'POST', body: { skus } });
+    toast(st.total === skus.length ? `Pesquisando ${skus.length} produto(s)…` : 'Já existe uma pesquisa em andamento');
+    drawResearchStatus(st);
+    pollResearch();
+  } catch (e) { toast(e.message, true); }
+}
+
+function drawResearchStatus(st) {
+  const prog = document.getElementById('pz-prog');
+  const btn = document.getElementById('pz-research');
+  if (!prog || !btn) return;
+  prog.classList.toggle('hidden', !st.running);
+  btn.disabled = !!st.running;
+  if (st.running) {
+    prog.querySelector('i').style.width = `${Math.round((st.done / Math.max(1, st.total)) * 100)}%`;
+    btn.textContent = `Pesquisando ${st.done}/${st.total}…`;
+  } else {
+    btn.textContent = 'Pesquisar preços';
+  }
+}
+
+function pollResearch() {
+  const pz = state.pricing;
+  clearInterval(pz.poll);
+  pz.poll = setInterval(async () => {
+    let st;
+    try { st = await api('/api/pricing/research'); } catch { return; }
+    drawResearchStatus(st);
+    if (st.running) return;
+    clearInterval(pz.poll);
+    pz.poll = null;
+    toast(`Pesquisa concluída: ${st.done} produto(s)${st.errors ? `, ${st.errors} sem resposta das fontes` : ''}`, st.errors > 0 && st.errors === st.done);
+    await loadPricing();
+  }, 1500);
+}
+
+// ------------------------------------------- gaveta: ofertas do produto
+async function openPricingDetail(sku) {
+  const drawer = document.getElementById('drawer');
+  const body = document.getElementById('drawer-body');
+  document.getElementById('drawer-title').textContent = sku;
+  body.innerHTML = '<p class="muted">Carregando…</p>';
+  if (!drawer.open) drawer.showModal();
+  let d;
+  try { d = await api(`/api/pricing/${encodeURIComponent(sku)}`); } catch (e) {
+    body.innerHTML = `<p class="lvl-error">${esc(e.message)}</p>`;
+    return;
+  }
+  const res = d.research;
+  const m = d.market;
+  document.getElementById('drawer-title').textContent = d.title;
+  body.innerHTML = `
+    <div class="status-line"><span>SKU <b>${esc(d.sku)}</b></span>
+      <span>Origem (teto) <b>${money(d.origin)}</b></span><span>Piso <b>${money(d.floor)}</b></span>
+      ${d.cost ? `<span>Custo ${money(d.cost)}</span>` : '<span class="muted">custo não informado na origem</span>'}
+      <span>Preço de venda <b>${d.price === null ? `${money(d.origin)} (origem)` : money(d.price)}</b>${d.strategy ? ` <span class="badge info">${esc(STRATEGY[d.strategy] || d.strategy)}</span>` : ''}</span></div>
+
+    <h4>Referências</h4>
+    <div class="table-wrap"><table><tr><th>Valor</th><th class="num">Preço</th><th>Como foi calculado</th><th></th></tr>
+      ${['origem', 'minimo', 'medio', 'sugerido'].map((k) => {
+        const v = d.values[k];
+        const how = { origem: 'Preço praticado na origem (promoção, se houver; com variações, a mais barata).', minimo: 'Menor preço válido encontrado no mercado.', medio: 'Ponto intermediário entre o mínimo do mercado e a origem.', sugerido: '' }[k];
+        return `<tr><td><b>${esc(STRATEGY[k][0].toUpperCase() + STRATEGY[k].slice(1))}</b></td><td class="num">${money(v.price)}</td>
+          <td class="muted">${esc([how, v.note].filter(Boolean).join(' '))}</td>
+          <td class="num">${v.price === null ? '' : `<button data-dapply="${k}" class="${d.price !== null && d.strategy === k ? 'primary' : ''}">Aplicar</button>`}</td></tr>`;
+      }).join('')}
+      <tr><td><b>Manual</b></td><td class="num"><input id="pd-manual" class="price-in" inputmode="decimal" value="${d.strategy === 'manual' ? brNum(d.price) : ''}" placeholder="0,00"></td>
+        <td class="muted">Valor livre. Fora do piso ou acima da origem, o AzureHub avisa mas respeita.</td><td class="num"><button id="pd-save">Salvar</button></td></tr>
+    </table></div>
+
+    <h4>Mercado</h4>
+    ${res ? `<div class="status-line">
+        <span>Pesquisado em <b>${when(res.collectedAt)}</b></span>
+        ${m ? `<span>${m.count} oferta(s) válida(s): mín. <b>${money(m.min)}</b> · mediana <b>${money(m.median)}</b> · média ${money(m.avg)} · máx. ${money(m.max)}</span>` : '<span class="lvl-warn">nenhuma oferta válida</span>'}
+      </div>
+      <p class="muted">Busca: “${esc(res.query && res.query.text)}”${res.query && res.query.gtin ? ` · GTIN ${esc(res.query.gtin)}` : ''}</p>
+      <div class="table-wrap"><table><tr><th>Fonte</th><th>Situação</th></tr>
+        ${res.sources.map((s) => `<tr><td>${esc(s.name)}</td><td class="${s.ok ? '' : 'lvl-error'}">${s.ok ? `${s.count} resultado(s)` : esc(s.error)}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">Nenhuma fonte consultada.</td></tr>'}
+      </table></div>
+      <h4>Ofertas encontradas (${res.offers.length})</h4>
+      <div class="table-wrap"><table><tr><th>Anúncio</th><th>Fonte</th><th class="num">Preço</th><th class="num">Similaridade</th><th>Por</th><th>Situação</th></tr>
+        ${res.offers.map((o) => `<tr class="${o.accepted ? '' : 'muted'}">
+          <td class="prod">${o.url ? `<a href="${esc(safeUrl(o.url))}" target="_blank" rel="noopener nofollow">${esc(o.title || o.url)}</a>` : esc(o.title)}${o.brand ? `<span class="sub">${esc(o.brand)}</span>` : ''}</td>
+          <td class="nowrap">${esc(o.source)}</td><td class="num">${money(o.price)}</td><td class="num">${Math.round((o.score || 0) * 100)}%</td>
+          <td class="nowrap">${esc(o.matchedBy || '')}</td>
+          <td>${o.accepted ? '<span class="badge ok">considerada</span>' : `<span class="badge">${esc(o.reason || 'descartada')}</span>`}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nenhuma oferta.</td></tr>'}
+      </table></div>` : '<p class="muted">Ainda não pesquisado. Use <b>Pesquisar</b> abaixo ou na grade.</p>'}
+    <div class="actions" style="justify-content:flex-start"><button id="pd-research">Pesquisar este produto agora</button></div>
+
+    <h4>URLs monitoradas</h4>
+    <p class="muted">Páginas de concorrentes que vendem <b>este mesmo produto</b>, uma por linha. Entram na pesquisa com similaridade 100%;
+      o preço é lido dos dados estruturados da página (JSON-LD/metatags), respeitando o robots.txt.</p>
+    <textarea id="pd-watch" class="mono" style="min-height:90px" placeholder="https://www.concorrente.com.br/produto/123">${esc(d.watchUrls.join('\n'))}</textarea>
+    <div class="actions"><button id="pd-watch-save">Salvar URLs</button></div>`;
+
+  body.querySelectorAll('[data-dapply]').forEach((b) => { b.onclick = () => busy(b, () => applyPricing([sku], b.dataset.dapply)); });
+  body.querySelector('#pd-save').onclick = (e) => busy(e.target, async () => {
+    await setManualPrice(sku, body.querySelector('#pd-manual').value);
+    openPricingDetail(sku);
+  });
+  body.querySelector('#pd-research').onclick = () => { drawer.close(); startResearch([sku]); };
+  body.querySelector('#pd-watch-save').onclick = (e) => busy(e.target, async () => {
+    const r = await api(`/api/pricing/${encodeURIComponent(sku)}/watch`, { method: 'PUT', body: { urls: body.querySelector('#pd-watch').value } });
+    toast(`${r.watch.length} URL(s) monitorada(s). Pesquise de novo para atualizar o mercado.`);
+  });
+}
+
+// ------------------------------------------ gaveta: fontes e regras
+async function openPricingSettings() {
+  const drawer = document.getElementById('drawer');
+  const body = document.getElementById('drawer-body');
+  document.getElementById('drawer-title').textContent = 'Precificação — fontes e regras';
+  body.innerHTML = '<p class="muted">Carregando…</p>';
+  if (!drawer.open) drawer.showModal();
+  const { settings: cfg, sourceTypes } = await api('/api/pricing/settings');
+  const types = Object.fromEntries(sourceTypes.map((t) => [t.type, t]));
+  const srcs = cfg.sources.map((s) => ({ ...s }));
+  const ml = state.platforms.find((p) => p.id === 'mercadolivre');
+
+  body.innerHTML = `
+    <div class="callout"><b>Coleta responsável.</b> O robô se identifica como <code>AzureHubPriceBot</code>, respeita o <code>robots.txt</code>,
+      espaça as requisições a cada site e guarda as respostas em cache. Ele <b>não</b> contorna captcha, login ou bloqueios anti-robô.
+      Prefira APIs públicas (VTEX, Shopify, WooCommerce) e a API oficial do Mercado Livre, e use só fontes cujos termos permitam a consulta.</div>
+    <h4>Regras</h4>
+    <div id="pz-rules-form" class="grid2">
+      ${field({ key: 'enabled', label: 'Módulo de Precificação ativo', type: 'checkbox', help: 'Desativado: os marketplaces voltam a receber o preço da origem.' }, cfg.enabled)}
+      ${field({ key: 'showOriginAsList', label: 'Enviar origem como preço “de”', type: 'checkbox', help: 'O preço de venda vira preço promocional (“por”) quando for menor que a origem.' }, cfg.showOriginAsList)}
+      ${field({ key: 'undercutPct', label: 'Sugerido: % abaixo da mediana', type: 'text', help: '0 a 50' }, cfg.undercutPct)}
+      ${field({ key: 'rounding', label: 'Arredondamento do sugerido', type: 'select', options: [['90', 'Final ,90 (para baixo)'], ['99', 'Final ,99 (para baixo)'], ['cent', 'Centavos']] }, cfg.rounding)}
+      ${field({ key: 'maxDiscountPct', label: 'Piso: desconto máximo sobre a origem (%)', type: 'text', help: '0 a 90' }, cfg.maxDiscountPct)}
+      ${field({ key: 'minMarginPct', label: 'Piso: margem mínima sobre o custo (%)', type: 'text', help: 'Só vale quando a origem informa o custo.' }, cfg.minMarginPct)}
+      ${field({ key: 'minSimilarity', label: 'Similaridade mínima das ofertas (%)', type: 'text', help: 'Ofertas menos parecidas com o produto são descartadas. Padrão 45.' }, Math.round(cfg.minSimilarity * 100))}
+      ${field({ key: 'cacheHours', label: 'Cache das consultas (horas)', type: 'text', help: '0 a 168. Evita repetir requisições aos mesmos sites.' }, cfg.cacheHours)}
+    </div>
+    <h4>Fontes de pesquisa</h4>
+    <div id="pz-srcs"></div>
+    <div class="toolbar"><select id="pz-newtype" style="max-width:340px">${sourceTypes.map((t) => `<option value="${t.type}">${esc(t.label)}</option>`).join('')}</select>
+      <button id="pz-add">Adicionar fonte</button></div>
+    <div class="actions"><button id="pz-cancel" class="ghost">Cancelar</button><button id="pz-save" class="primary">Salvar</button></div>`;
+
+  const holder = body.querySelector('#pz-srcs');
+  const collect = () => holder.querySelectorAll('.src-card').forEach((card) => {
+    const i = Number(card.dataset.i);
+    Object.assign(srcs[i], readFields(card));
+  });
+  const drawSrcs = () => {
+    holder.innerHTML = srcs.map((s, i) => {
+      const t = types[s.type] || { label: s.type, fields: [] };
+      const needs = t.needsPlatform === 'mercadolivre' && !(ml && ml.connected)
+        ? '<p class="lvl-warn">Conecte a conta do Mercado Livre em Integração › Destinos para usar esta fonte.</p>' : '';
+      return `<div class="src-card" data-i="${i}">
+        <header><span><b>${esc(t.label)}</b><small class="muted"> ${esc(t.description || '')}</small></span>
+          <button class="ghost danger" data-rm="${i}">Remover</button></header>
+        ${needs}
+        <div class="grid2">
+          ${field({ key: 'name', label: 'Nome', type: 'text' }, s.name || t.label)}
+          ${field({ key: 'interval_ms', label: 'Intervalo entre requisições ao site (ms)', type: 'text', help: 'Vazio = padrão da fonte (1,5 a 3 s). Mínimo 1000.' }, s.interval_ms || '')}
+          ${t.fields.map((f) => field(f, s[f.key])).join('')}
+          ${field({ key: 'enabled', label: 'Ativa', type: 'checkbox' }, s.enabled !== false)}
+          ${field({ key: 'respect_robots', label: 'Respeitar robots.txt', type: 'checkbox', help: 'Desligue apenas em sites seus ou com autorização expressa.' }, s.respect_robots !== false)}
+        </div></div>`;
+    }).join('') || '<p class="muted">Nenhuma fonte cadastrada. Sem fontes, a Precificação usa só a origem e os valores manuais.</p>';
+    holder.querySelectorAll('[data-rm]').forEach((b) => {
+      b.onclick = () => { collect(); srcs.splice(Number(b.dataset.rm), 1); drawSrcs(); };
+    });
+  };
+  drawSrcs();
+  body.querySelector('#pz-add').onclick = () => {
+    collect();
+    const type = body.querySelector('#pz-newtype').value;
+    srcs.push({ type, name: types[type].label, enabled: true, respect_robots: true });
+    drawSrcs();
+    holder.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  body.querySelector('#pz-cancel').onclick = () => drawer.close();
+  body.querySelector('#pz-save').onclick = (e) => busy(e.target, async () => {
+    collect();
+    const rules = readFields(body.querySelector('#pz-rules-form'));
+    rules.minSimilarity = Number(String(rules.minSimilarity).replace(',', '.')) / 100;
+    for (const k of ['undercutPct', 'maxDiscountPct', 'minMarginPct', 'cacheHours']) rules[k] = Number(String(rules[k]).replace(',', '.'));
+    const r = await api('/api/pricing/settings', { method: 'PUT', body: { ...rules, sources: srcs } });
+    toast(`Configurações salvas${r.queued ? ` · ${r.queued} reenvio(s) na fila` : ''}`);
+    drawer.close();
+    if (r.settings.enabled !== state.modules.pricing) route(); else loadPricing();
   });
 }
 
@@ -575,7 +999,7 @@ async function viewPrevia() {
   $app.innerHTML = `
     <div class="view-head">
       <div><h1>Prévia</h1><p class="muted">Como os ${skus.length} produto(s) vão subir em cada marketplace. Nada é enviado nesta tela.</p></div>
-      <div class="toolbar" style="margin:0"><a href="#produtos" class="btn-link">Voltar para Produtos</a><button id="pv-send" class="primary" disabled>Enviar prontos</button></div>
+      <div class="toolbar" style="margin:0"><a href="#produtos" class="btn-link">Voltar para Produtos</a>${state.modules.pricing ? '<a href="#precificacao" class="btn-link">Precificação</a>' : ''}<button id="pv-send" class="primary" disabled>Enviar prontos</button></div>
     </div>
     <div class="toolbar">${Object.keys(PLAT).map((id) => `<label class="switch"><input type="checkbox" data-pv-target="${id}" ${state.targets.has(id) ? 'checked' : ''}> ${PLAT[id]}</label>`).join('')}</div>
     <div id="pv-summary" class="status-line"></div>
@@ -637,7 +1061,8 @@ function drawPreview(total, targets) {
     if (it.missing) return `<div class="panel pv"><div class="pv-head"><h3>${esc(it.sku)}</h3><span class="badge err">não encontrado</span></div></div>`;
     const tab = pv.tab[it.sku] || targets.find((t) => it.platforms[t]);
     return `<article class="panel pv" data-sku="${esc(it.sku)}">
-      <div class="pv-head"><h3>${esc(it.title)} <span class="muted">${esc(it.sku)}</span></h3></div>
+      <div class="pv-head"><h3>${esc(it.title)} <span class="muted">${esc(it.sku)}</span></h3>
+        ${it.pricing ? `<span class="badge info" title="Definido na Precificação">Preço de venda ${money(it.pricing.final)} · origem ${money(it.pricing.origin)} · ${esc(STRATEGY[it.pricing.strategy] || it.pricing.strategy)}</span>` : ''}</div>
       <div class="pv-tabs">${targets.filter((t) => it.platforms[t]).map((t) => {
         const r = it.platforms[t];
         return `<button data-tab="${t}" class="${t === tab ? 'on' : ''}">${r.ready ? '✅' : '⛔'} ${PLAT[t]}</button>`;
@@ -757,7 +1182,7 @@ async function drawSub(silent) {
         <td class="nowrap">${esc(PLAT[r.platform])}</td>
         <td class="nowrap">${statusBadge(r.status)} ${r.outdated && r.status === 'synced' ? '<span class="badge warn">desatualizado</span>' : ''} ${job}</td>
         <td class="nowrap">${r.externalId ? (r.permalink ? `<a href="${esc(safeUrl(r.permalink))}" target="_blank" rel="noopener" data-stop>${esc(r.externalId)}</a>` : esc(r.externalId)) : '—'}</td>
-        <td class="num">${r.promoPrice ? `<span class="strike">${money(r.price)}</span>${money(r.promoPrice)}` : money(r.price)}</td>
+        <td class="num">${r.salePrice ? `<span class="strike">${money(r.promoPrice || r.price)}</span>${money(r.salePrice)}<span class="sub sale">precificado</span>` : r.promoPrice ? `<span class="strike">${money(r.price)}</span>${money(r.promoPrice)}` : money(r.price)}</td>
         <td class="num">${r.stock}</td><td class="num">${r.variants || '—'}</td>
         <td class="nowrap">${when(r.productUpdatedAt)}</td><td class="nowrap">${when(r.lastSync)}</td>
         <td class="${r.status === 'error' ? 'lvl-error' : 'muted'}" title="${esc(r.message || '')}">${esc((r.message || '').slice(0, 90))}${(r.message || '').length > 90 ? '…' : ''}</td></tr>`;
@@ -894,7 +1319,10 @@ async function openDetail(sku) {
 }
 
 document.getElementById('drawer-close').onclick = () => document.getElementById('drawer').close();
-document.getElementById('drawer').addEventListener('close', () => { if (location.hash === '#sincronizacao') drawSub(true).catch(() => {}); });
+document.getElementById('drawer').addEventListener('close', () => {
+  if (location.hash === '#sincronizacao') drawSub(true).catch(() => {});
+  if (location.hash === '#precificacao') loadPricing().catch(() => {});
+});
 
 // ================================================================ boot
 document.getElementById('btn-logout').onclick = async () => { await api('/api/logout', { method: 'POST' }).catch(() => {}); showLogin(); };

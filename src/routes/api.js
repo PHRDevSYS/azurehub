@@ -7,6 +7,7 @@ const platforms = require('../platforms');
 const source = require('../source');
 const engine = require('../sync/engine');
 const { previewProducts } = require('../sync/preview');
+const pricing = require('../pricing');
 
 const COOKIE = 'azurehub_session';
 const installed = () => !!store.getSetting('installed');
@@ -69,6 +70,14 @@ async function checkSource(cfg) {
 }
 
 const list = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((x) => String(x).trim()).filter(Boolean);
+
+// Preço de venda definido na Precificação (quando o módulo está ativo).
+function withSalePrice(data) {
+  if (!pricing.getSettings().enabled) return data;
+  const pr = store.pricingFor([...new Set(data.items.map((i) => i.sku))]);
+  for (const i of data.items) i.salePrice = pr[i.sku] && pr[i.sku].price !== null ? pr[i.sku].price : null;
+  return data;
+}
 
 function register(r) {
   // ---------- status / instalação ----------
@@ -241,12 +250,13 @@ function register(r) {
   // ---------- Produtos capturados ----------
   r.get('/api/products', requireAdmin, async (ctx) => {
     const q = ctx.url.searchParams;
-    return store.listProducts({
+    const data = store.listProducts({
       limit: Math.min(500, Number(q.get('limit') || 100)),
       offset: Number(q.get('offset') || 0),
       search: q.get('q') || '',
       filter: q.get('filter') || 'all',
     });
+    return withSalePrice(data);
   });
 
   // Detalhe completo (tela Sincronização): dados, mídia, vínculos, fila e log.
@@ -258,7 +268,7 @@ function register(r) {
       const l = store.getListing(id, p.sku);
       if (l) {
         const { images, video, size_chart: chart, ...meta } = l.meta || {};
-        listings[id] = { ...l, meta, outdated: l.last_hash !== p.hash && l.status !== 'paused', mediaSent: images ? Object.keys(images).length : 0 };
+        listings[id] = { ...l, meta, outdated: l.status === 'synced' && l.last_hash !== store.syncHashOf(p), mediaSent: images ? Object.keys(images).length : 0 };
       }
     }
     return {
@@ -313,7 +323,7 @@ function register(r) {
       platform: q.get('platform') || '',
       status: q.get('status') || '',
     });
-    return { ...data, counts: store.syncCounts(), jobs: store.jobStats(), lastCapture: store.getSetting('last_capture', null) };
+    return { ...withSalePrice(data), counts: store.syncCounts(), jobs: store.jobStats(), lastCapture: store.getSetting('last_capture', null) };
   });
 
   // Reenviar: força o envio dos selecionados (ou de todos já selecionados).
@@ -407,4 +417,4 @@ function register(r) {
   });
 }
 
-module.exports = { register };
+module.exports = { register, requireAdmin };
