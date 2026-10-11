@@ -59,9 +59,9 @@ function register(r, { requireAdmin }) {
       const prod = store.getProduct(sku);
       if (prod) items.push(row(prod, res[sku], pr[sku], cfg));
     }
-    const { enabled, rounding, undercutPct, maxDiscountPct, minMarginPct, showOriginAsList } = cfg;
+    const { enabled, rounding, undercutPct, maxDiscountPct, minMarginPct, showOriginAsList, allowAboveOrigin, maxAbovePct } = cfg;
     return {
-      settings: { enabled, rounding, undercutPct, maxDiscountPct, minMarginPct, showOriginAsList },
+      settings: { enabled, rounding, undercutPct, maxDiscountPct, minMarginPct, showOriginAsList, allowAboveOrigin, maxAbovePct },
       sources: { total: cfg.sources.length, active: cfg.sources.filter((s) => s.enabled !== false).length },
       items, research: research.status(),
     };

@@ -221,6 +221,41 @@ test('regras: mínimo, médio, sugerido, piso e teto', () => {
   assert.match(ev.values.sugerido.note, /sem dados de mercado/);
 });
 
+test('opção "permitir acima da origem": teto = origem + X%', () => {
+  const market = { stats: { count: 4, min: 110, max: 140, median: 120, avg: 122 } };
+  const off = { ...pricing.DEFAULTS, enabled: true };
+  let ev = pricing.evaluate({ price: 100 }, market, null, off);
+  assert.deepEqual([ev.ceiling, ev.values.minimo.price, ev.values.medio.price, ev.values.sugerido.price], [100, 100, 100, 100], 'desligada: origem é o teto');
+
+  const on = { ...off, allowAboveOrigin: true, maxAbovePct: 20 };
+  ev = pricing.evaluate({ price: 100 }, market, null, on);
+  assert.equal(ev.ceiling, 120);
+  assert.equal(ev.values.minimo.price, 110);
+  assert.equal(ev.values.medio.price, 105, '(mínimo + origem) / 2');
+  assert.equal(ev.values.sugerido.price, 115.9, 'mediana 120 − 3% = 116,40 → 115,90');
+  assert.equal(ev.values.origem.price, 100);
+
+  ev = pricing.evaluate({ price: 100 }, market, null, { ...on, maxAbovePct: 10 });
+  assert.deepEqual([ev.ceiling, ev.values.minimo.price, ev.values.sugerido.price], [110, 110, 109.9], 'sugerido no teto calculado é arredondado para baixo');
+  assert.match(ev.values.sugerido.note, /acima do teto de R\$ 110,00 → R\$ 109,90/);
+  ev = pricing.evaluate({ price: 100 }, market, null, { ...on, maxAbovePct: 0 });
+  assert.deepEqual([ev.ceiling, ev.values.sugerido.price], [100, 100], 'arredondar o teto nunca fica abaixo da origem');
+  ev = pricing.evaluate({ price: 100 }, { stats: { ...market.stats, min: 150 } }, null, { ...on, maxAbovePct: 10 });
+  assert.deepEqual([ev.values.minimo.price, ev.values.minimo.clamped], [110, true]);
+  assert.match(ev.values.minimo.note, /teto de R\$ 110,00 \(origem \+ 10%\)/);
+
+  // Aplicado acima da origem: vale até o teto; desligar a opção volta à origem.
+  assert.equal(pricing.salePrice({ price: 100 }, { price: 118, strategy: 'sugerido' }, on), 118);
+  assert.equal(pricing.salePrice({ price: 100 }, { price: 130, strategy: 'minimo' }, on), 120);
+  assert.equal(pricing.salePrice({ price: 100 }, { price: 118, strategy: 'sugerido' }, off), 100);
+  assert.equal(pricing.salePrice({ price: 100 }, { price: 150, strategy: 'manual' }, off), 150, 'manual não é limitado');
+
+  // Custo alto: piso acima do teto → fica o teto (nunca acima dele).
+  ev = pricing.evaluate({ price: 100, cost: 200 }, market, null, on);
+  assert.deepEqual([ev.floor, ev.ceiling, ev.values.minimo.price, ev.values.sugerido.price], [220, 120, 120, 120]);
+  assert.equal(pricing.salePrice({ price: 100, cost: 200 }, { price: 90, strategy: 'minimo' }, on), 120);
+});
+
 // ============================================================= fontes
 const q = (text, gtin = null) => ({ text, gtin, brand: null });
 
@@ -594,6 +629,46 @@ test('preço aplicado acompanha origem e custo atuais (teto e piso no envio)', a
   assert.deepEqual([row.strategy, row.effective, row.adjusted], ['origem', 90, false]);
   assert.equal(pricing.effectiveProduct(store.getProduct('PAN').data).promoPrice, 90, 'envia a origem como ela é');
   assert.equal((await call('GET', '/api/products?limit=50')).body.items.find((i) => i.sku === 'PAN').salePrice, null);
+});
+
+test('acima da origem no envio: preço cheio, de/por e reenvio ao mudar a opção', async () => {
+  const push = (p) => realFetch(`${base}/api/v1/products`, { method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify(p) })
+    .then((r) => r.json());
+  await call('PUT', '/api/pricing/settings', { enabled: true, showOriginAsList: false, maxDiscountPct: 30, minMarginPct: 10, allowAboveOrigin: true, maxAbovePct: 20 });
+  await push({ sku: 'CAN', title: 'Caneca', price: 50, stock: 3, images: ['https://img.test/c.jpg'],
+    variants: [{ sku: 'CAN-A', options: { Cor: 'Azul' }, price: 50, promoPrice: 40, stock: 1 }, { sku: 'CAN-B', options: { Cor: 'Rosa' }, price: 60, stock: 2 }] });
+  store.saveResearch('CAN', { query: { text: 'Caneca' }, offers: [], sources: [], stats: { count: 3, min: 44, max: 60, median: 50, avg: 51 } });
+  store.selectForPlatform('mercadolivre', 'CAN');
+
+  let r = await call('POST', '/api/pricing/apply', { skus: ['CAN'], strategy: 'minimo' });
+  assert.equal(r.body.applied, 1);
+  let row = (await call('GET', '/api/pricing/CAN')).body;
+  assert.deepEqual([row.origin, row.ceiling, row.price, row.effective, row.diffPct], [40, 48, 44, 44, 10]);
+  assert.match((await call('GET', '/api/pricing?skus=CAN')).body.settings.maxAbovePct + '', /20/);
+  let eff = pricing.effectiveProduct(store.getProduct('CAN').data);
+  assert.deepEqual(eff.variants.map((v) => [v.price, v.promoPrice]), [[44, null], [66, null]], 'variações sobem na mesma proporção');
+
+  // Origem como "de": acima do preço promocional mas abaixo do cheio → de/por; acima do cheio → preço cheio.
+  await call('PUT', '/api/pricing/settings', { showOriginAsList: true });
+  eff = pricing.effectiveProduct(store.getProduct('CAN').data);
+  assert.deepEqual([eff.price, eff.promoPrice], [50, 44]);
+  assert.deepEqual(eff.variants.map((v) => [v.price, v.promoPrice]), [[50, 44], [66, null]]);
+  await call('POST', '/api/pricing/manual', { sku: 'CAN', price: 55 });
+  eff = pricing.effectiveProduct(store.getProduct('CAN').data);
+  assert.deepEqual([eff.pricing.final, eff.promoPrice], [55, null]);
+  assert.deepEqual(eff.variants.map((v) => [v.price, v.promoPrice]), [[55, null], [82.5, null]], 'manual acima do preço cheio não volta à origem');
+  r = await call('POST', '/api/pricing/manual', { sku: 'CAN', price: 60 });
+  assert.match(r.body.warnings[0], /acima do teto de R\$ 48,00/);
+
+  // Desligar a opção: o mínimo aplicado volta ao teto = origem, com reenvio.
+  await call('PUT', '/api/pricing/settings', { showOriginAsList: false });
+  await call('POST', '/api/pricing/apply', { skus: ['CAN'], strategy: 'minimo' });
+  store.saveListing('mercadolivre', 'CAN', { status: 'synced', external_id: 'MLB3', last_hash: store.syncHashOf(store.getProduct('CAN')) });
+  store.clearFinishedJobs();
+  r = await call('PUT', '/api/pricing/settings', { allowAboveOrigin: false });
+  assert.ok(r.body.queued >= 1);
+  row = (await call('GET', '/api/pricing/CAN')).body;
+  assert.deepEqual([row.ceiling, row.price, row.effective, row.adjusted], [40, 44, 40, true]);
 });
 
 test('pesquisa já em andamento não inicia outra', async () => {

@@ -655,9 +655,9 @@ async function loadPricing() {
   if (all) all.onclick = (e) => { e.preventDefault(); pz.picked.clear(); pz.sel.clear(); loadPricing(); };
   const round = { 90: 'final ,90', 99: 'final ,99', cent: 'centavos' }[cfg.rounding] || cfg.rounding;
   document.getElementById('pz-rules').innerHTML = `
-    <b>Origem</b> = preço praticado na origem (teto) · <b>Mínimo</b> = menor preço encontrado no mercado ·
+    <b>Origem</b> = preço praticado na origem${cfg.allowAboveOrigin ? ` · <b>Teto</b> = origem + ${esc(cfg.maxAbovePct)}%` : ' (teto)'} · <b>Mínimo</b> = menor preço encontrado no mercado ·
     <b>Médio</b> = meio-termo entre o mínimo e a origem · <b>Sugerido</b> = mediana do mercado − ${esc(cfg.undercutPct)}%, ${esc(round)}.
-    Nenhum valor fica abaixo do <b>piso</b> (origem − ${esc(cfg.maxDiscountPct)}% ou custo + ${esc(cfg.minMarginPct)}%, o maior).
+    Nenhum valor fica abaixo do <b>piso</b> (origem − ${esc(cfg.maxDiscountPct)}% ou custo + ${esc(cfg.minMarginPct)}%, o maior) nem acima do teto.
     ${cfg.showOriginAsList ? '<br>Envio: origem como preço “de” e o preço de venda como “por” (promoção).' : ''}
     ${data.sources.active ? '' : '<br><span class="lvl-warn">Nenhuma fonte de pesquisa ativa — cadastre em <b>Fontes e regras</b>.</span>'}`;
   drawResearchStatus(data.research);
@@ -716,7 +716,7 @@ function drawPricing() {
       return `<tr class="clickable ${pz.sel.has(r.sku) ? 'sel' : ''}" data-sku="${esc(r.sku)}">
         <td><input type="checkbox" class="chk" ${pz.sel.has(r.sku) ? 'checked' : ''}></td>
         <td class="prod">${esc(r.title)}<span class="sub">${esc([r.sku, r.brand, r.variants ? `${r.variants} variações` : null, r.active ? null : 'inativo na origem'].filter(Boolean).join(' · '))}</span></td>
-        <td class="num">${pickBtn(r, 'origem')}<span class="sub" title="Piso: menor preço permitido pelas regras">piso ${money(r.floor)}${r.cost ? ` · custo ${money(r.cost)}` : ''}</span></td>
+        <td class="num">${pickBtn(r, 'origem')}<span class="sub" title="Piso e teto: faixa permitida pelas regras">piso ${money(r.floor)}${r.ceiling > r.origin ? ` · teto ${money(r.ceiling)}` : ''}${r.cost ? ` · custo ${money(r.cost)}` : ''}</span></td>
         <td class="num">${mk}${fail}</td>
         ${pickCell(r, 'minimo')}${pickCell(r, 'medio')}${pickCell(r, 'sugerido')}
         <td class="num"><input class="price-in" inputmode="decimal" value="${r.price === null ? '' : brNum(r.price)}" placeholder="${esc(brNum(r.origin))}" aria-label="Preço de venda de ${esc(r.sku)}">
@@ -852,7 +852,7 @@ async function openPricingDetail(sku) {
   document.getElementById('drawer-title').textContent = d.title;
   body.innerHTML = `
     <div class="status-line"><span>SKU <b>${esc(d.sku)}</b></span>
-      <span>Origem (teto) <b>${money(d.origin)}</b></span><span>Piso <b>${money(d.floor)}</b></span>
+      <span>Origem <b>${money(d.origin)}</b></span><span>Piso <b>${money(d.floor)}</b></span><span>Teto <b>${money(d.ceiling)}</b>${d.ceiling > d.origin ? '' : ' <span class="muted">(= origem)</span>'}</span>
       ${d.cost ? `<span>Custo ${money(d.cost)}</span>` : '<span class="muted">custo não informado na origem</span>'}
       <span>Preço de venda <b>${money(d.effective)}</b>${hasSale(d) ? ` <span class="badge info">${esc(STRATEGY[d.strategy] || d.strategy)}</span>` : ' <span class="muted">(origem)</span>'}
         ${d.adjusted ? `<span class="lvl-warn">aplicado ${money(d.price)}, ajustado ao piso/teto atual</span>` : ''}</span></div>
@@ -863,11 +863,11 @@ async function openPricingDetail(sku) {
         const v = d.values[k];
         const how = { origem: 'Preço praticado na origem (promoção, se houver; com variações, a mais barata). Aplicado, acompanha a origem.', minimo: 'Menor preço válido encontrado no mercado.', medio: 'Ponto intermediário entre o mínimo do mercado e a origem.', sugerido: '' }[k];
         return `<tr><td><b>${esc(STRATEGY[k][0].toUpperCase() + STRATEGY[k].slice(1))}</b></td><td class="num">${money(v.price)}</td>
-          <td class="muted">${esc([how, v.note].filter(Boolean).join(' '))}</td>
+          <td class="muted">${esc([how, v.note && v.note[0].toUpperCase() + v.note.slice(1)].filter(Boolean).join(' '))}</td>
           <td class="num">${v.price === null ? '' : `<button data-dapply="${k}" class="${hasSale(d) && d.strategy === k ? 'primary' : ''}">Aplicar</button>`}</td></tr>`;
       }).join('')}
       <tr><td><b>Manual</b></td><td class="num"><input id="pd-manual" class="price-in" inputmode="decimal" value="${d.strategy === 'manual' ? brNum(d.price) : ''}" placeholder="0,00"></td>
-        <td class="muted">Valor livre. Fora do piso ou acima da origem, o AzureHub avisa mas respeita.</td><td class="num"><button id="pd-save">Salvar</button></td></tr>
+        <td class="muted">Valor livre. Abaixo do piso ou acima do teto, o AzureHub avisa mas respeita.</td><td class="num"><button id="pd-save">Salvar</button></td></tr>
     </table></div>
 
     <h4>Mercado</h4>
@@ -927,6 +927,8 @@ async function openPricingSettings() {
     <div id="pz-rules-form" class="grid2">
       ${field({ key: 'enabled', label: 'Módulo de Precificação ativo', type: 'checkbox', help: 'Desativado: os marketplaces voltam a receber o preço da origem.' }, cfg.enabled)}
       ${field({ key: 'showOriginAsList', label: 'Enviar origem como preço “de”', type: 'checkbox', help: 'O preço de venda vira preço promocional (“por”) quando for menor que a origem.' }, cfg.showOriginAsList)}
+      ${field({ key: 'allowAboveOrigin', label: 'Permitir preço acima da origem', type: 'checkbox', help: 'Quando o mercado está acima, mínimo, médio e sugerido podem passar da origem até o teto abaixo.' }, cfg.allowAboveOrigin)}
+      ${field({ key: 'maxAbovePct', label: 'Teto: até quantos % acima da origem', type: 'text', help: '0 a 300. Só vale com a opção ao lado ligada.' }, cfg.maxAbovePct)}
       ${field({ key: 'undercutPct', label: 'Sugerido: % abaixo da mediana', type: 'text', help: '0 a 50' }, cfg.undercutPct)}
       ${field({ key: 'rounding', label: 'Arredondamento do sugerido', type: 'select', options: [['90', 'Final ,90 (para baixo)'], ['99', 'Final ,99 (para baixo)'], ['cent', 'Centavos']] }, cfg.rounding)}
       ${field({ key: 'maxDiscountPct', label: 'Piso: desconto máximo sobre a origem (%)', type: 'text', help: '0 a 90' }, cfg.maxDiscountPct)}
@@ -979,7 +981,7 @@ async function openPricingSettings() {
     collect();
     const rules = readFields(body.querySelector('#pz-rules-form'));
     rules.minSimilarity = Number(String(rules.minSimilarity).replace(',', '.')) / 100;
-    for (const k of ['undercutPct', 'maxDiscountPct', 'minMarginPct', 'cacheHours']) rules[k] = Number(String(rules[k]).replace(',', '.'));
+    for (const k of ['undercutPct', 'maxDiscountPct', 'minMarginPct', 'maxAbovePct', 'cacheHours']) rules[k] = Number(String(rules[k]).replace(',', '.'));
     const r = await api('/api/pricing/settings', { method: 'PUT', body: { ...rules, sources: srcs } });
     toast(`Configurações salvas${r.queued ? ` · ${r.queued} reenvio(s) na fila` : ''}`);
     drawer.close();

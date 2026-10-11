@@ -4,6 +4,7 @@
 //
 // Valores por produto:
 //   origem   = preço praticado na origem (promoção, se houver) — é o TETO
+//              (com "permitir acima da origem": teto = origem + X%)
 //   mínimo   = menor preço de mercado encontrado (valor raspado)
 //   médio    = ponto intermediário entre o mínimo e a origem
 //   sugerido = mediana do mercado com um pequeno desconto, arredondada,
@@ -21,6 +22,8 @@ const DEFAULTS = {
   rounding: '90',          // 90 → R$ x,90 | 99 → R$ x,99 | cent → centavos
   minSimilarity: 0.45,     // similaridade mínima para considerar uma oferta
   showOriginAsList: false, // envia a origem como preço "de" e o definido como "por"
+  allowAboveOrigin: false, // permite preço de venda acima da origem…
+  maxAbovePct: 20,         // …até origem + 20% (teto)
   cacheHours: 12,
   sources: [],             // fontes de pesquisa configuradas
 };
@@ -55,16 +58,24 @@ function floorOf(p, origin, cfg) {
   return r2(Math.max(byDiscount, byCost));
 }
 
+// Teto: a origem, ou origem + X% quando a opção "permitir acima da origem" está ligada.
+function ceilingOf(origin, cfg) {
+  return cfg.allowAboveOrigin ? r2(origin * (1 + cfg.maxAbovePct / 100)) : origin;
+}
+
+// Entre o piso e o teto; se o piso passar do teto (custo alto), vale o teto.
+const bound = (v, floor, ceiling) => r2(Math.min(ceiling, Math.max(floor, v)));
+
 // Preço de venda que vale AGORA. Estratégias acompanham a origem e o custo
-// atuais: nunca acima da origem (teto) nem abaixo do piso — se a origem cair
-// ou o custo subir depois de aplicar, o envio se ajusta sozinho. "origem"
-// segue a origem; o manual é respeitado como foi digitado.
+// atuais: nunca acima do teto nem abaixo do piso — se a origem cair ou o custo
+// subir depois de aplicar, o envio se ajusta sozinho. "origem" segue a
+// origem; o manual é respeitado como foi digitado.
 function salePrice(p, row, cfg = getSettings()) {
   if (!cfg.enabled || !row || row.strategy === 'origem') return null;
   if (row.price === null || row.price === undefined) return null;
   if (row.strategy === 'manual') return row.price;
   const origin = originPrice(p);
-  return r2(Math.min(origin, Math.max(floorOf(p, origin, cfg), row.price)));
+  return bound(row.price, floorOf(p, origin, cfg), ceilingOf(origin, cfg));
 }
 
 // Entra no hash de sincronização: mudou o preço efetivo → anúncio desatualizado.
@@ -77,12 +88,16 @@ function saleKey(sku, data, cfg = getSettings()) {
 function evaluate(p, research, pricing, cfg = getSettings()) {
   const origin = originPrice(p);
   const floor = floorOf(p, origin, cfg);
+  const ceiling = ceilingOf(origin, cfg);
+  const above = cfg.allowAboveOrigin;
+  const capNote = above ? `limitado ao teto de ${brl(ceiling)} (origem + ${cfg.maxAbovePct}%)` : 'mercado acima da origem: mantido o preço de origem';
   const market = research && research.stats ? research.stats : null;
   const clamp = (v) => {
     if (v === null || v === undefined) return { price: null, note: 'sem dados de mercado' };
-    if (v < floor) return { price: floor, note: `limitado ao piso de ${brl(floor)}`, clamped: true };
-    if (v > origin) return { price: origin, note: 'mercado acima da origem: mantido o preço de origem', clamped: true };
-    return { price: r2(v), note: null };
+    const b = bound(v, floor, ceiling);
+    if (b === r2(v)) return { price: b, note: null };
+    const note = v > ceiling ? capNote : floor > ceiling ? `piso de ${brl(floor)} acima do teto: mantido o teto` : `limitado ao piso de ${brl(floor)}`;
+    return { price: b, note, clamped: true };
   };
   const values = {
     origem: { price: origin, note: null },
@@ -92,13 +107,14 @@ function evaluate(p, research, pricing, cfg = getSettings()) {
   };
   if (market) {
     const target = market.median * (1 - cfg.undercutPct / 100);
-    // Acima da origem fica a própria origem (sem arredondar para baixo do teto).
-    let s = target >= origin ? origin : roundPrice(target, cfg.rounding);
+    // No teto ou acima: a origem fica exata; um teto calculado (origem + X%)
+    // é arredondado para baixo, como o resto do sugerido.
+    let s = target >= ceiling ? (above ? Math.max(origin, roundPrice(ceiling, cfg.rounding)) : ceiling) : roundPrice(target, cfg.rounding);
     let note = `mediana de ${market.count} oferta(s) ${brl(market.median)} − ${cfg.undercutPct}% = ${brl(target)}`;
-    if (target > origin) note += '; acima da origem → teto';
+    if (target > ceiling) note += above ? `; acima do teto de ${brl(ceiling)} → ${brl(s)}` : '; acima da origem → teto';
     if (s < floor) {
-      s = floor;
-      note += `; abaixo do piso → ${brl(floor)}`;
+      s = Math.min(floor, ceiling);
+      note += floor > ceiling ? '; piso acima do teto → teto' : `; abaixo do piso → ${brl(floor)}`;
     }
     values.sugerido = { price: s, note };
   }
@@ -106,7 +122,7 @@ function evaluate(p, research, pricing, cfg = getSettings()) {
   const sale = salePrice(p, pricing, cfg);
   const effective = sale === null ? origin : sale;
   return {
-    origin, floor, cost: p.cost || null, market, values,
+    origin, floor, ceiling, cost: p.cost || null, market, values,
     price: defined, strategy: pricing ? pricing.strategy : null, effective,
     // Preço aplicado antes e ajustado agora ao piso/teto (origem ou custo mudaram).
     adjusted: sale !== null && defined !== null && sale !== defined,
@@ -126,12 +142,13 @@ function effectiveProduct(p, cfg = getSettings()) {
   // A janela de promoção da origem não vale para o preço definido aqui.
   const out = { ...p, promoStart: null, promoEnd: null, pricing: { origin: base, final: target, strategy: row.strategy } };
   if (cfg.showOriginAsList) {
-    // Preço "de" = origem; "por" = definido (vira promoção nos marketplaces).
-    out.price = p.price;
+    // Preço "de" = preço cheio da origem; "por" = definido (vira promoção).
+    // Definido no preço cheio ou acima: não há "de/por", vai o definido.
+    out.price = Math.max(p.price, target);
     out.promoPrice = target < p.price ? target : null;
     out.variants = (p.variants || []).map((v) => {
       const por = r2((v.promoPrice || v.price) * factor);
-      return { ...v, promoPrice: por < v.price ? por : null };
+      return { ...v, price: Math.max(v.price, por), promoPrice: por < v.price ? por : null };
     });
   } else {
     out.price = target;
@@ -173,14 +190,16 @@ function saveSettings(input) {
     rounding: ['90', '99', 'cent'].includes(input.rounding) ? input.rounding : cur.rounding,
     minSimilarity: num(input.minSimilarity ?? cur.minSimilarity, 0.1, 1, DEFAULTS.minSimilarity),
     showOriginAsList: input.showOriginAsList !== undefined ? !!input.showOriginAsList : cur.showOriginAsList,
+    allowAboveOrigin: input.allowAboveOrigin !== undefined ? !!input.allowAboveOrigin : cur.allowAboveOrigin,
+    maxAbovePct: num(input.maxAbovePct ?? cur.maxAbovePct, 0, 300, DEFAULTS.maxAbovePct),
     cacheHours: num(input.cacheHours ?? cur.cacheHours, 0, 168, DEFAULTS.cacheHours),
     sources: input.sources !== undefined ? cleanSources(input.sources) : cur.sources,
   };
   store.setSetting('pricing', next);
   let queued = 0;
-  if (['enabled', 'showOriginAsList', 'maxDiscountPct', 'minMarginPct'].some((k) => next[k] !== cur[k])) {
+  if (['enabled', 'showOriginAsList', 'maxDiscountPct', 'minMarginPct', 'allowAboveOrigin', 'maxAbovePct'].some((k) => next[k] !== cur[k])) {
     // O preço efetivo dos produtos com preço definido pode ter mudado (módulo,
-    // modo de envio, ou piso que agora limita um preço aplicado antes).
+    // modo de envio, ou piso/teto que agora limitam um preço aplicado antes).
     store.refreshAllSyncHashes();
     const skus = store.open().prepare('SELECT sku FROM pricing WHERE price IS NOT NULL').all().map((r) => r.sku);
     queued = resyncIntegrated(skus);
@@ -241,7 +260,7 @@ function setManual(sku, price) {
   store.setPricing(sku, { price: value, strategy: 'manual' });
   const warnings = [];
   if (value < ev.floor) warnings.push(`abaixo do piso de ${brl(ev.floor)} (margem/desconto máximo)`);
-  if (value > ev.origin) warnings.push('acima do preço de origem');
+  if (value > ev.ceiling) warnings.push(ev.ceiling > ev.origin ? `acima do teto de ${brl(ev.ceiling)} (origem + margem permitida)` : 'acima do preço de origem');
   return { price: value, warnings, queued: resyncIntegrated([sku]) };
 }
 

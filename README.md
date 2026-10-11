@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.3.1-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.4.0-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -79,11 +79,12 @@ Ative em **Integração › Módulos › Precificação**. A tela aparece entre
 
 | Valor | Como é calculado |
 |---|---|
-| **Origem** | Preço praticado na origem (o promocional, se houver; com variações, a mais barata). É o **teto**: nenhuma referência passa dele. Aplicar *Origem* faz o produto **acompanhar a origem** (se ela mudar, o envio muda junto). |
+| **Origem** | Preço praticado na origem (o promocional, se houver; com variações, a mais barata). Aplicar *Origem* faz o produto **acompanhar a origem** (se ela mudar, o envio muda junto). |
+| **Teto** | Por padrão, a própria origem: nenhuma referência passa dela. Com **Permitir preço acima da origem** (em *Fontes e regras*), o teto vira *origem + X%* (padrão 20%, até 300%): quando o mercado está acima, mínimo, médio e sugerido podem subir até ele. |
 | **Mínimo** | Menor preço válido encontrado no mercado (o valor "raspado"). |
 | **Médio** | Ponto intermediário entre o mínimo do mercado e a origem. |
-| **Sugerido** | Mediana do mercado menos um desconto (padrão 3%), arredondada **para baixo** (final ,90, ,99 ou centavos). Se o mercado estiver acima da origem, fica a origem. |
-| **Piso** | Proteção da margem: o maior entre *origem − desconto máximo* (padrão 30%) e *custo + margem mínima* (padrão 10%, quando a origem informa o custo — Bling, Nuvemshop, banco ou API com `cost`). Mínimo, médio e sugerido nunca ficam abaixo do piso (⚑ na grade). |
+| **Sugerido** | Mediana do mercado menos um desconto (padrão 3%), arredondada **para baixo** (final ,90, ,99 ou centavos). Se o mercado estiver acima do teto, fica o teto (a origem exata; um teto *origem + X%* também arredondado para baixo). |
+| **Piso** | Proteção da margem: o maior entre *origem − desconto máximo* (padrão 30%) e *custo + margem mínima* (padrão 10%, quando a origem informa o custo — Bling, Nuvemshop, banco ou API com `cost`). Mínimo, médio e sugerido nunca ficam abaixo do piso nem acima do teto (⚑ na grade). Se o custo levar o piso acima do teto, vale o teto. |
 
 Na grade, um clique em um valor aplica aquela referência ao produto; com
 vários marcados, a barra **Aplicar em massa** aplica *Mínimo*, *Médio*,
@@ -98,7 +99,9 @@ piso e o teto atuais: se a origem cair abaixo dele, ou o custo subir e levantar
 o piso, o envio se ajusta sozinho e a grade mostra "enviado R$ …". O preço
 **manual** vai como foi digitado. Com
 *Enviar origem como preço "de"*, a origem vai como preço cheio e o preço de
-venda como promoção. Mudar o preço de um produto já publicado o deixa
+venda como promoção (se o preço de venda for igual ou maior que o preço cheio,
+não há "de/por": vai o preço de venda). Ligar, desligar ou mudar o % do teto
+também reprocessa os preços aplicados. Mudar o preço de um produto já publicado o deixa
 **desatualizado** e coloca o reenvio na fila; desligar o módulo devolve todos
 ao preço da origem (também com reenvio).
 
@@ -475,7 +478,7 @@ public/                  painel: Integração, Produtos, Precificação, Prévia
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` — 90 casos: conectores de origem (Bling, WooCommerce,
+Testes: `npm test` — 92 casos: conectores de origem (Bling, WooCommerce,
 Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
 prévia → envio → sincronização → pausa), publicação e prévia nas três
 plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
