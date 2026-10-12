@@ -250,3 +250,98 @@ test('PRÉVIA com variações: modelo da conta, eixos e regra de preço do clás
   assert.deepEqual(off.errors, []);
   assert.match(off.fields.find((x) => x.label === 'Modelo de anúncio').value, /definido pela conta/);
 });
+
+// ============================================== promoção e status (todos os modos)
+const simples = (over = {}) => normalizeProduct({
+  sku: 'GAR', title: 'Garrafa Térmica', price: 100, stock: 3, images: ['https://site.test/g.jpg'], categories: { mercadolivre: 'MLB1' }, ...over,
+});
+const promoCalls = (calls) => calls.filter((c) => c.path.startsWith('/seller-promotions'));
+
+test('PROMOÇÃO: janela de até 14 dias, não recria a mesma, renova quando vence e remove quando sai da origem', async () => {
+  // Sem data de fim: pede 14 dias (o limite da doc), não 30.
+  let calls = mock({ 'POST /items': () => ({ id: 'MLB7' }) });
+  let res = await ml.publish(ctx(), simples({ promoPrice: 89.9 }), null);
+  let post = promoCalls(calls).find((c) => c.method === 'POST');
+  const days = (new Date(post.body.finish_date + 'Z') - new Date(post.body.start_date + 'Z')) / 86400e3;
+  assert.ok(Math.abs(days - 14) < 0.01, `janela de ${days} dias`);
+  const listing = { external_id: 'MLB7', meta: res.meta };
+
+  // Mesma promoção na próxima sincronização: nenhuma chamada de promoção.
+  calls = mock();
+  res = await ml.publish(ctx(), simples({ promoPrice: 89.9 }), listing);
+  assert.equal(promoCalls(calls).length, 0);
+  assert.equal(res.meta.promo.price, 89.9);
+
+  // Preço promocional mudou: remove a campanha anterior e cria outra.
+  calls = mock();
+  res = await ml.publish(ctx(), simples({ promoPrice: 79.9 }), listing);
+  assert.deepEqual(promoCalls(calls).map((c) => [c.method, c.body && c.body.deal_price]), [['DELETE', null], ['POST', 79.9]]);
+  assert.match(promoCalls(calls)[0].search, /promotion_type=PRICE_DISCOUNT/);
+
+  // Campanha vencida com a origem ainda em promoção: renova.
+  calls = mock();
+  const expired = { ...listing, meta: { ...listing.meta, promo: { ...listing.meta.promo, end: new Date(Date.now() - 1000).toISOString() } } };
+  await ml.publish(ctx(), simples({ promoPrice: 89.9 }), expired);
+  assert.deepEqual(promoCalls(calls).map((c) => c.method), ['POST'], 'vencida não precisa de DELETE');
+
+  // Promoção saiu da origem: remove do ML e limpa o meta.
+  calls = mock();
+  res = await ml.publish(ctx(), simples(), listing);
+  assert.deepEqual(promoCalls(calls).map((c) => c.method), ['DELETE']);
+  assert.equal(res.meta.promo, null);
+
+  // Fim pedido além de 14 dias: limitado, com aviso.
+  calls = mock({ 'POST /items': () => ({ id: 'MLB8' }) });
+  res = await ml.publish(ctx(), simples({ promoPrice: 89.9, promoEnd: new Date(Date.now() + 40 * 86400e3).toISOString() }), null);
+  post = promoCalls(calls).find((c) => c.method === 'POST');
+  assert.ok((new Date(post.body.finish_date + 'Z') - Date.now()) / 86400e3 < 14.1);
+  assert.match(res.warnings.join(), /limitado a 14 dias/);
+});
+
+test('STATUS: inativo na origem pausa uma vez; ativo de novo reativa o anúncio', async () => {
+  let calls = mock();
+  let res = await ml.publish(ctx(), simples({ active: false }), { external_id: 'MLB7', meta: {} });
+  assert.ok(calls.some((c) => c.method === 'PUT' && c.body && c.body.status === 'paused'));
+  assert.equal(res.meta.paused, true);
+
+  calls = mock();
+  await ml.publish(ctx(), simples({ active: false }), { external_id: 'MLB7', meta: { paused: true } });
+  assert.ok(!calls.some((c) => c.body && c.body.status), 'já pausado: não repete');
+
+  calls = mock();
+  res = await ml.publish(ctx(), simples(), { external_id: 'MLB7', meta: { paused: true } });
+  assert.ok(calls.some((c) => c.method === 'PUT' && c.body && c.body.status === 'active'));
+  assert.equal(res.meta.paused, false);
+  assert.match(res.warnings.join(), /reativado/);
+});
+
+test('CLÁSSICO: opção corrigida na origem reenvia a combinação só daquela variação', async () => {
+  const p = camiseta();
+  p.variants[0].options = { Cor: 'Preto', Tamanho: 'PP' }; // corrigido de P para PP
+  const calls = mock({
+    'GET /items/MLB1': () => ({ id: 'MLB1', variations: [
+      { id: 1000, attribute_combinations: [{ id: 'COLOR', value_name: 'Preto' }, { id: 'SIZE', value_name: 'P' }], attributes: [{ id: 'SELLER_SKU', value_name: 'CAM-PR-P' }] },
+      { id: 1001, attribute_combinations: [{ id: 'COLOR', value_name: 'Preto' }, { id: 'SIZE', value_name: 'M' }], attributes: [{ id: 'SELLER_SKU', value_name: 'CAM-PR-M' }] },
+      { id: 1002, attribute_combinations: [{ id: 'COLOR', value_name: 'Azul' }, { id: 'SIZE', value_name: 'G' }], attributes: [{ id: 'SELLER_SKU', value_name: 'CAM-AZ-G' }] },
+    ] }),
+    'PUT /items/MLB1': () => ({ id: 'MLB1' }),
+  });
+  const res = await ml.publish(ctx(), p, { external_id: 'MLB1', meta: { model: 'classic', category_id: 'MLB31447' } });
+  const put = calls.find((c) => c.method === 'PUT' && c.body && c.body.variations).body;
+  assert.deepEqual(put.variations[0].attribute_combinations, [{ id: 'COLOR', value_id: '52049', value_name: 'Preto' }, { id: 'SIZE', value_name: 'PP' }]);
+  assert.equal(put.variations[1].attribute_combinations, undefined);
+  assert.equal(put.variations[2].attribute_combinations, undefined);
+  assert.match(res.warnings.join(), /CAM-PR-P: opções alteradas/);
+});
+
+test('USER PRODUCTS: promoção removida de uma variação sai só do anúncio dela', async () => {
+  const listing = { external_id: 'MLB100', meta: { model: 'up', category_id: 'MLB31447', family_name: 'Camiseta Básica Algodão',
+    items: { 'CAM-PR-P': 'MLB100', 'CAM-PR-M': 'MLB101' }, desc_hash: 'x',
+    promos: { 'CAM-PR-M': { price: 49.9, start: new Date().toISOString(), end: new Date(Date.now() + 86400e3).toISOString(), requested: [null, null] } } } };
+  const p = camiseta();
+  p.variants.splice(2, 1);
+  const calls = mock({}, { up: true });
+  const res = await ml.publish(ctx(), p, listing);
+  assert.deepEqual(promoCalls(calls).map((c) => [c.method, c.path]), [['DELETE', '/seller-promotions/items/MLB101']]);
+  assert.equal(res.meta.promos['CAM-PR-M'], null);
+});

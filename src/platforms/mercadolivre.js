@@ -61,6 +61,7 @@ module.exports = {
     }
     const warnings = [];
     const meta = {};
+    const prev = (listing && listing.meta) || {};
     const pictures = p.images.slice(0, 10).map((source) => ({ source }));
     if (p.images.length > 10) warnings.push('Mercado Livre aceita até 10 fotos; as excedentes foram ignoradas');
 
@@ -126,15 +127,30 @@ module.exports = {
       if (p.description) {
         await api(ctx, 'PUT', `/items/${itemId}/description`, { plain_text: plainText(p.description) });
       }
-      if (!p.active) await api(ctx, 'PUT', `/items/${itemId}`, { status: 'paused' }).catch(() => {});
+      Object.assign(meta, await syncStatus(ctx, itemId, p.active, prev, warnings));
     }
 
-    if (p.promoPrice) meta.promo = await applyDiscount(ctx, itemId, p.promoPrice, p, warnings);
+    meta.promo = await syncDiscount(ctx, itemId, p.promoPrice, p, prev.promo, warnings);
     return { externalId: itemId, meta, warnings };
   },
 
   preview: (ctx, p) => preview(ctx, p),
 };
+
+// Inativo na origem → pausa; ativo de novo → reativa (o estoque sozinho não
+// tira do "paused" um anúncio pausado pelo vendedor).
+async function syncStatus(ctx, itemId, active, prev, warnings) {
+  if (!active && !prev.paused) {
+    await api(ctx, 'PUT', `/items/${itemId}`, { status: 'paused' }).catch((e) => warnings.push(`Não pausei ${itemId}: ${e.message}`));
+    return { paused: true };
+  }
+  if (active && prev.paused) {
+    await api(ctx, 'PUT', `/items/${itemId}`, { status: 'active' });
+    warnings.push(`Anúncio ${itemId} reativado`);
+    return { paused: false };
+  }
+  return {};
+}
 
 function shippingOf(ctx, p) {
   const dims = p.lengthCm && p.widthCm && p.heightCm && p.weightKg
@@ -144,17 +160,45 @@ function shippingOf(ctx, p) {
 }
 
 // Preço promocional: campanha própria do vendedor (PRICE_DISCOUNT), por item.
-async function applyDiscount(ctx, itemId, dealPrice, p, warnings) {
+// A doc (pt_br/desconto-individua) limita a campanha a 14 dias: sem data de
+// fim (ou fim mais longe), o hub pede 14 dias e renova quando ela termina.
+const PROMO_MAX_DAYS = 14;
+const round2 = (x) => Math.round(x * 100) / 100;
+const mlDate = (d) => d.toISOString().replace(/\.\d+Z$/, '');
+
+function promoWindow(p, now = Date.now()) {
+  const start = p.promoStart && new Date(p.promoStart) > new Date(now) ? new Date(p.promoStart) : new Date(now + 5 * 60e3);
+  const max = new Date(start.getTime() + PROMO_MAX_DAYS * 86400e3);
+  const wanted = p.promoEnd ? new Date(p.promoEnd) : max;
+  return { start, end: wanted > max ? max : wanted, capped: !!p.promoEnd && wanted > max };
+}
+
+async function removeDiscount(ctx, itemId, warnings) {
+  await api(ctx, 'DELETE', `/seller-promotions/items/${itemId}?promotion_type=PRICE_DISCOUNT&app_version=v2`)
+    .catch((e) => warnings.push(`Promoção anterior não removida (${itemId}): ${e.message}`));
+}
+
+// Deixa o desconto do item igual ao da origem. Devolve o estado para o meta
+// (null = sem promoção) e só chama a API quando algo mudou ou a campanha venceu.
+async function syncDiscount(ctx, itemId, dealPrice, p, prev, warnings) {
+  const now = Date.now();
+  const live = prev && prev.end && new Date(prev.end).getTime() > now ? prev : null;
+  if (!dealPrice) {
+    if (live) await removeDiscount(ctx, itemId, warnings);
+    return null;
+  }
+  const price = round2(dealPrice);
+  const requested = [p.promoStart || null, p.promoEnd || null];
+  if (live && live.price === price && JSON.stringify(live.requested) === JSON.stringify(requested)) return live;
+  if (live) await removeDiscount(ctx, itemId, warnings);
+  const win = promoWindow(p, now);
+  if (p.promoEnd && win.end <= win.start) return null; // a promoção da origem já terminou
   try {
-    const start = p.promoStart && new Date(p.promoStart) > new Date() ? new Date(p.promoStart) : new Date(Date.now() + 5 * 60e3);
-    const end = p.promoEnd ? new Date(p.promoEnd) : new Date(start.getTime() + 30 * 86400e3);
     await api(ctx, 'POST', `/seller-promotions/items/${itemId}?app_version=v2`, {
-      promotion_type: 'PRICE_DISCOUNT',
-      deal_price: Math.round(dealPrice * 100) / 100,
-      start_date: start.toISOString().replace(/\.\d+Z$/, ''),
-      finish_date: end.toISOString().replace(/\.\d+Z$/, ''),
+      promotion_type: 'PRICE_DISCOUNT', deal_price: price, start_date: mlDate(win.start), finish_date: mlDate(win.end),
     });
-    return { price: Math.round(dealPrice * 100) / 100, start: start.toISOString(), end: end.toISOString() };
+    if (win.capped) warnings.push(`Mercado Livre: desconto limitado a ${PROMO_MAX_DAYS} dias por campanha; o hub renova quando terminar`);
+    return { price, start: win.start.toISOString(), end: win.end.toISOString(), requested };
   } catch (e) {
     warnings.push(`Promoção não aplicada${itemId ? ` (${itemId})` : ''}: ${e.message}`);
     return null;
@@ -341,11 +385,18 @@ async function classicVariations(ctx, p, listing, { categoryId, info, axes, pict
     // PUT com TODAS as variações que ficam (com id); as omitidas são apagadas.
     const cur = await api(ctx, 'GET', `/items/${itemId}?include_attributes=all`);
     const existing = mapVariations(cur.variations, p, axes, comboKey);
+    const currentCombo = new Map((cur.variations || []).map((x) => [String(x.id), comboKey((x.attribute_combinations || []).map((c) => ({ id: c.id, name: c.name, value_name: c.value_name })))]));
     const variations = p.variants.map((v, i) => {
       const b = variationBody(v, i);
       if (!existing[v.sku]) return b;
-      const { attribute_combinations: _, ...rest } = b; // combinação não muda numa variação que já existe
-      return { id: Number(existing[v.sku]) || existing[v.sku], ...rest };
+      const { attribute_combinations: combo, ...rest } = b;
+      const out = { id: Number(existing[v.sku]) || existing[v.sku], ...rest };
+      // Só reenvia a combinação se ela mudou na origem (o ML recusa em variação com vendas).
+      if (currentCombo.get(String(existing[v.sku])) !== comboKey(combo)) {
+        out.attribute_combinations = combo;
+        warnings.push(`Variação ${v.sku}: opções alteradas na origem (${Object.values(v.options).join(' / ')})`);
+      }
+      return out;
     });
     const removed = (cur.variations || []).filter((x) => !Object.values(existing).map(String).includes(String(x.id)));
     const body = { pictures: union.map((source) => ({ source })), attributes: itemAttributes(p, axes), variations };
@@ -356,19 +407,20 @@ async function classicVariations(ctx, p, listing, { categoryId, info, axes, pict
     if (added.length) warnings.push(`Variações incluídas: ${added.map((v) => v.sku).join(', ')}`);
     if (removed.length) warnings.push(`Variações removidas do anúncio: ${removed.length}`);
     if (p.description) await api(ctx, 'PUT', `/items/${itemId}/description`, { plain_text: plainText(p.description) });
-    if (!p.active) await api(ctx, 'PUT', `/items/${itemId}`, { status: 'paused' }).catch(() => {});
+    Object.assign(meta, await syncStatus(ctx, itemId, p.active, (listing && listing.meta) || {}, warnings));
   }
   meta.category_id = categoryId;
 
   // Desconto é por item: vale para todas as variações (só se todas tiverem promoção).
   const promos = p.variants.map((v) => v.promoPrice);
+  let deal = null;
   if (promos.every((x) => x)) {
-    const deal = Math.max(...promos);
+    deal = Math.max(...promos);
     if (new Set(promos).size > 1) warnings.push(`Mercado Livre (modelo clássico): a promoção vale para o anúncio todo; usado o maior preço promocional (${deal.toFixed(2)})`);
-    meta.promo = await applyDiscount(ctx, itemId, deal, p, warnings);
   } else if (promos.some((x) => x)) {
     warnings.push('Mercado Livre (modelo clássico): promoção só em algumas variações não existe — o desconto é do anúncio todo; não aplicado');
   }
+  meta.promo = await syncDiscount(ctx, itemId, deal, p, ((listing && listing.meta) || {}).promo, warnings);
   return { externalId: itemId, meta, warnings };
 }
 
@@ -393,6 +445,7 @@ async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, war
   const meta = { model: 'up', category_id: categoryId, family_name: prev.family_name || p.title.slice(0, info.settings.max_title_length || 60) };
   const items = { ...(prev.items || {}) };
   const paused = { ...(prev.paused || {}) };
+  const promos = { ...(prev.promos || {}) };
   const descHash = sha256(p.description || '');
   const videoId = p.videos.map(youtubeId).find(Boolean);
   const shared = itemAttributes(p, axes);
@@ -430,10 +483,7 @@ async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, war
     }
     items[v.sku] = id;
     firstId = firstId || id;
-    if (v.promoPrice) {
-      const promo = await applyDiscount(ctx, id, v.promoPrice, p, warnings);
-      if (promo) (meta.promos ||= {})[v.sku] = promo;
-    }
+    promos[v.sku] = await syncDiscount(ctx, id, v.promoPrice, p, (prev.promos || {})[v.sku], warnings);
   }
   // Variação que saiu da origem: pausa o anúncio dela (encerrar não tem volta).
   for (const sku of Object.keys(items)) {
@@ -447,7 +497,7 @@ async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, war
   if (!firstId) {
     return { externalId: null, meta: { ...meta, items, skipped: true }, warnings: [...warnings, 'Mercado Livre: nenhuma variação com estoque — anúncios criados quando houver estoque'] };
   }
-  return { externalId: String(firstId), meta: { ...meta, items, paused, permalink, desc_hash: descHash }, warnings };
+  return { externalId: String(firstId), meta: { ...meta, items, paused, promos, permalink, desc_hash: descHash }, warnings };
 }
 
 async function findBySellerSku(ctx, sku) {
@@ -474,9 +524,9 @@ async function preview(ctx, p) {
   let promoText = 'Sem promoção';
   const promo = variants.length ? (variants.every((v) => v.promoPrice) ? Math.max(...variants.map((v) => v.promoPrice)) : null) : p.promoPrice;
   if (promo) {
-    const start = p.promoStart && new Date(p.promoStart) > new Date() ? new Date(p.promoStart) : new Date(Date.now() + 5 * 60e3);
-    const end = p.promoEnd ? new Date(p.promoEnd) : new Date(start.getTime() + 30 * 86400e3);
-    promoText = `${H_.money(promo)} · ${H_.when(start / 1000)} → ${H_.when(end / 1000)} (campanha do vendedor)`;
+    const win = promoWindow(p);
+    promoText = `${H_.money(promo)} · ${H_.when(win.start / 1000)} → ${H_.when(win.end / 1000)} (campanha do vendedor)`;
+    if (win.capped || !p.promoEnd) warnings.push(`O ML limita o desconto a ${PROMO_MAX_DAYS} dias por campanha: o hub renova quando terminar`);
   }
   let category = p.categories.mercadolivre || (ctx && ctx.creds.default_category_id) || null;
   let categoryNote = null;

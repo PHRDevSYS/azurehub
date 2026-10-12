@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.5.0-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.5.1-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -274,7 +274,12 @@ Em todos, cadastre no app do desenvolvedor a **URL de retorno** exibida no card:
 - Informe **App ID** e **Chave secreta**; escopos `read`, `write`, `offline_access`.
 - Categoria: usa `category_ml` do produto, depois a categoria padrão do card e,
   se nenhuma existir, **prevê pelo título** (`domain_discovery`).
-- Promoção: campanha própria do vendedor (`PRICE_DISCOUNT`, `deal_price`).
+- Promoção: campanha própria do vendedor (`PRICE_DISCOUNT`, `deal_price`),
+  de no máximo **14 dias** (regra do ML): sem data de fim, ou com fim mais
+  longe, o hub pede 14 dias e renova quando a campanha termina. Só recria
+  quando o preço ou as datas mudam, e **remove** a campanha quando a promoção
+  sai da origem.
+- Produto inativo na origem pausa o anúncio; ativo de novo, o hub reativa.
 - Vídeo: o anúncio aceita link do **YouTube** (`video_id`). Arquivos de vídeo
   (clips) ficam para a próxima versão; o hub avisa no log.
 - **Variações** (tênis, roupas): o ML tem dois modelos e o hub escolhe pela
@@ -514,7 +519,7 @@ public/                  painel: Integração, Produtos, Precificação, Prévia
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` — 111 casos: conectores de origem (Bling, WooCommerce,
+Testes: `npm test` — 115 casos: conectores de origem (Bling, WooCommerce,
 Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
 prévia → envio → sincronização → pausa), publicação e prévia nas três
 plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
