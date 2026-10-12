@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.6.0-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.7.0-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -33,15 +33,16 @@ preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e v
                                                   páginas com JSON-LD, Scrapling
 ```
 
-O painel tem quatro telas, mais a **Precificação** quando o módulo está ativo:
+O painel tem cinco telas, mais a **Precificação** quando o módulo está ativo:
 
 | Tela | O que faz |
 |---|---|
 | **Integração** | **Origem:** escolha o ERP/site (Bling, WooCommerce, Shopify, Nuvemshop, banco de dados ou API própria), informe as credenciais, teste e capture. **Destino:** os 3 cards dos marketplaces (credenciais, conectar, testar, ativar). |
 | **Produtos** | Grade dos produtos capturados (SKU, título, preço/promoção, estoque, nº de variações, contagem de mídia, data de atualização e situação em cada destino). Selecione um ou vários, escolha os destinos e **pré-visualize** ou **envie para integração**. |
 | **Precificação** *(módulo opcional)* | Entre Produtos e Prévia. Compara o preço da origem com produtos similares pesquisados no mercado e define o **preço de venda** enviado aos marketplaces — por produto ou **em massa** (mínimo, médio, origem ou sugerido). Ver [Precificação](#precificação-módulo-opcional). |
-| **Prévia** | Como cada produto vai subir em cada marketplace — exatamente o que será enviado (título cortado, categoria, marca, atributos, GTIN, frete, promoção com a janela ajustada, variações…), com **erros** que bloqueiam e **avisos**. Nada é enviado nesta tela. |
+| **Prévia** | Como cada produto vai subir em cada marketplace — exatamente o que será enviado (título cortado, categoria, marca, atributos, GTIN, frete, promoção com a janela ajustada, variações…), com **erros** que bloqueiam e **avisos**. Nada é enviado nesta tela. Daqui saem também a **mídia UGC** (3 fotos e 1 vídeo com influencer gerados por IA) e a **auditoria com IA** de cada anúncio. |
 | **Sincronização** | Grade produto × destino com status, ID no marketplace (com link), preço, estoque, data/hora da atualização na origem e da última sincronização, mensagem e situação na fila. Ao clicar, o **detalhe completo**: fotos, vídeos, todos os dados, variações, destinos e histórico. Fila e log de eventos em abas. |
+| **Agentes de IA** | Provedores de IA (OpenAI, Google Gemini, xAI, DeepSeek, OpenRouter) com a sua chave e, para cada agente — mídia UGC, precificação, auditor, CRM —, o provedor e o modelo de cada função. Ver [Agentes de IA](#agentes-de-ia). |
 
 ![Integração](docs/integracao.png)
 ![Produtos](docs/produtos.png)
@@ -192,10 +193,21 @@ Provedores:
 | **Google Gemini** | `gemini-3.6-flash` | Nano Banana 2.1 (`gemini-nano-banana-2.1`) | Gemini Omni (`gemini-omni-1.1-flash`, 3–10 s, áudio nativo) | Interactions API; exige projeto com faturamento |
 | **xAI (Grok)** | `grok-4.3` | Grok Imagine Image 2.0 | Grok Imagine Video 1.5 (até 15 s, sincronia labial, referências de pessoa e produto) | sem 4:5 nas fotos (usa 3:4) |
 | **DeepSeek** | `deepseek-flash`, `deepseek-v4-pro` | — | — | texto muito barato; a API da DeepSeek não gera imagem nem vídeo |
-| **OpenRouter** | centenas de modelos (recomendados: Llama 3 e Qwen 8B) | modelos de imagem do catálogo | modelos de vídeo do catálogo | **uma chave só** para todos; roteia para o fornecedor mais barato |
+| **OpenRouter** | centenas de modelos — recomendados: `meta-llama/llama-3.3-70b-instruct`, `meta-llama/llama-3.1-8b-instruct`, `qwen/qwen3-14b` | Nano Banana, GPT Image, Seedream, Grok, FLUX… | Grok Imagine, Veo 3.1, Seedance, Kling… | **uma chave só** para todos |
 
 Em cada função dá para digitar o id de **qualquer** modelo do provedor (as
 listas são sugestões). Modelo vazio usa o padrão do provedor.
+
+**Por que OpenRouter.** Em vez de abrir conta em cinco provedores, uma chave do
+OpenRouter dá acesso aos modelos de todos eles; cada pedido vai ao fornecedor
+**mais barato** do modelo naquele momento (`provider.sort: "price"`, ajustável
+para mais rápido ou menor latência na conexão), e trocar de modelo é mudar só o
+nome na tela. O hub pede JSON com o plugin de conserto (`response-healing`),
+respeita o limite de imagens de referência e as proporções de cada modelo de
+imagem (ex.: Grok aceita 3 fotos e não tem 4:5 → 3:4) e ajusta a duração do
+vídeo à mais próxima que o modelo aceita. Observação de out/2026: o
+`qwen/qwen3-8b` ficou **sem fornecedor** no OpenRouter (e o `qwen3.5-9b` sai do
+catálogo em 21/10/2026); o `qwen/qwen3-14b` é o Qwen pequeno mais próximo.
 
 ### Geração de mídia UGC (Prévia)
 
@@ -575,6 +587,10 @@ FROM variacoes v JOIN produtos p ON p.id = v.produto_id
 - Senha do painel com scrypt; sessão em cookie `HttpOnly` (`Secure` quando a
   URL é HTTPS); login bloqueia por 10 minutos após 5 erros.
 - A chave de API é guardada só como hash.
+- As chaves dos provedores de IA também ficam cifradas e só aparecem com os 4
+  últimos caracteres. Os arquivos de mídia UGC são servidos só com login, e os
+  downloads de vídeo dos provedores só aceitam o domínio do próprio provedor
+  (a chave nunca vai para outro endereço).
 - A consulta da fonte precisa começar com `SELECT`/`WITH`, mas **use um usuário
   de banco somente-leitura**: essa é a proteção real.
 - OAuth com `state` de uso único (expira em 15 min).
@@ -587,6 +603,8 @@ src/
   config.js              .env e caminhos
   routes/api.js          instalação, login, origem, destinos, produtos, prévia, sincronização, OAuth
   routes/pricing.js      módulo de Precificação
+  routes/ai.js           Agentes de IA (provedores, modelo por agente, auditor)
+  routes/ugc.js          mídia UGC (roteiro, geração, arquivos)
   lib/store.js           banco interno (node:sqlite): produtos, vínculos, fila, logs
   lib/crypto.js          cofre AES-GCM, scrypt, HMAC
   lib/media.js           cliente HTTP comum + download de fotos/vídeos
@@ -597,8 +615,11 @@ src/
   sync/preview.js        prévia produto × destino
   pricing/               regras de preço, pesquisa em segundo plano, similaridade, HTTP educado
     sources/             mercadolivre, vtex/shopify/woocommerce, html (JSON-LD), scrapling
+  ai/                    agentes de IA: configuração, auditor, agente de precificação
+    providers/           openai, google, xai, deepseek, openrouter (fetch puro)
+  ugc/                   mídia UGC: agente de roteiro e fila de geração (data/ugc)
 scraper/                 trabalhador Python opcional (Scrapling)
-public/                  painel: Integração, Produtos, Precificação, Prévia, Sincronização
+public/                  painel: Integração, Produtos, Precificação, Prévia, Sincronização, Agentes de IA
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
@@ -617,7 +638,13 @@ duas categorias (camisetas e celulares), backoff e falha parcial; e a Precifica�
 pesquisa com respostas simuladas (inclusive o trabalhador Scrapling), regras
 de piso/teto/arredondamento, aplicação em massa, preço efetivo no envio
 (acompanhando origem e custo) e reenvio automático dos produtos já publicados,
-bloqueio de rede interna e de redirecionamentos, limites de tamanho e cache.
+bloqueio de rede interna e de redirecionamentos, limites de tamanho e cache;
+e os Agentes de IA: o formato exato das requisições de cada provedor (OpenAI,
+Google, xAI, DeepSeek, OpenRouter) com respostas simuladas — imagens de
+referência, vídeo assíncrono, download só do domínio do provedor, erros de
+chave/crédito/conteúdo, nova tentativa em limite de uso —, a fila da mídia UGC
+(persona, retomada após reinício, lote, formato de foto recusado), a migração
+da configuração antiga, o agente de Precificação e o Auditor.
 
 ## Antes de ir para produção
 
@@ -633,6 +660,14 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
       usuário de teste o modelo User Products do ML (agrupamento em família) e,
       na TikTok, se a loja aceita estoque 0 por SKU e a troca de produto simples
       para produto com variações.
+- [ ] **Agentes de IA com chaves reais**: os conectores seguem a documentação
+      oficial de out/2026 e foram testados com respostas simuladas; falta a
+      chamada real em cada provedor. Conferir em especial a fala em português
+      nos vídeos (Gemini Omni, Grok Imagine e modelos do OpenRouter não citam
+      pt-BR como avaliado) e se o OpenRouter aceita a foto da persona embutida
+      (data URL) como referência de vídeo.
+- [ ] **CRM (atendimento)**: o agente aparece na tela com a escolha de modelo,
+      mas responder compradores ainda não está implementado.
 - [ ] **Vídeo no Mercado Livre** por arquivo (clips); hoje só YouTube.
 - [ ] **Webhooks/notificações** das plataformas (pedidos, perguntas, mudança
       de status do anúncio) — o beta é só de envio (site → marketplaces).

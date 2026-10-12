@@ -8,6 +8,7 @@ const openai = require('../src/ai/providers/openai');
 const google = require('../src/ai/providers/google');
 const xai = require('../src/ai/providers/xai');
 const deepseek = require('../src/ai/providers/deepseek');
+const openrouter = require('../src/ai/providers/openrouter');
 const { sniffImage } = require('../src/ai/providers/http');
 
 const realFetch = global.fetch;
@@ -68,11 +69,33 @@ test('OpenAI: roteiro em JSON pelo chat e teste da chave sem custo', async () =>
   assert.match(t.warning, /gpt-image-2\.5-sunburst/, 'avisa quando a chave não enxerga o modelo escolhido');
 });
 
+test('OpenAI: raciocínio baixo como "developer", qualidade só até "high" fora do 2.5 e recusa explicada', async () => {
+  reply(200, { choices: [{ finish_reason: 'stop', message: { content: '{"a":1}', refusal: null } }] });
+  await openai.writeJson(cfgOf(openai), { system: 's', user: 'u' });
+  const c = calls[0].body;
+  assert.deepEqual([c.reasoning_effort, c.messages[0].role, c.max_completion_tokens], ['low', 'developer', 16000]);
+  reply(200, { choices: [{ finish_reason: 'stop', message: { content: null, refusal: 'Não posso ajudar com isso.' } }] });
+  await assert.rejects(openai.writeJson(cfgOf(openai), { system: 's', user: 'u' }), /recusou o pedido \(Não posso ajudar com isso\.\)/);
+  reply(200, { choices: [{ finish_reason: 'length', message: { content: '{"a":' } }] });
+  await assert.rejects(openai.writeJson(cfgOf(openai), { system: 's', user: 'u' }), /cortada pelo limite/);
+
+  reply(200, { data: [{ b64_json: JPG.toString('base64') }] });
+  await openai.image({ ...cfgOf(openai, { quality: 'xhigh' }), models: { image: 'gpt-image-2' } }, { prompt: 'x', refs: [ref(1)], aspect: '4:5' });
+  assert.equal(calls.at(-1).body.quality, 'high', 'gpt-image-2 não tem "xhigh"');
+  reply(200, { data: [{ b64_json: JPG.toString('base64') }] });
+  await openai.image(cfgOf(openai, { quality: 'xhigh' }), { prompt: 'x', refs: [ref(1)], aspect: '4:5' });
+  assert.equal(calls.at(-1).body.quality, 'xhigh');
+});
+
 test('OpenAI: erros viram mensagens claras (chave, créditos, conteúdo bloqueado)', async () => {
   reply(401, { error: { message: 'Incorrect API key provided', type: 'invalid_request_error' } });
   await assert.rejects(openai.test(cfgOf(openai)), /chave de API inválida/);
   reply(429, { error: { message: 'You exceeded your current quota', type: 'insufficient_quota', code: 'insufficient_quota' } });
-  await assert.rejects(openai.image(cfgOf(openai), { prompt: 'x', refs: [ref(1)], aspect: '4:5' }), /sem créditos/);
+  await assert.rejects(openai.image(cfgOf(openai), { prompt: 'x', refs: [ref(1)], aspect: '4:5' }), (e) => /sem créditos/.test(e.message) && !e.retryable, 'crédito: não adianta repetir');
+  reply(429, { error: { message: 'Rate limit reached for requests', type: 'requests', code: 'rate_limit_exceeded' } }, { 'Retry-After': '7' });
+  await assert.rejects(openai.image(cfgOf(openai), { prompt: 'x', refs: [ref(1)], aspect: '4:5' }), (e) => e.retryable && e.retryAfter === 7);
+  reply(403, { error: { message: 'Country, region, or territory not supported', type: 'request_forbidden', code: 'unsupported_country_region_territory' } });
+  await assert.rejects(openai.test(cfgOf(openai)), /não atende a região/);
   reply(400, { error: { type: 'image_generation_user_error', code: 'moderation_blocked', message: 'Your request was rejected by the safety system.' } });
   await assert.rejects(openai.image(cfgOf(openai), { prompt: 'x', refs: [ref(1)], aspect: '4:5' }), (e) => /política de conteúdo/.test(e.message) && !e.retryable);
 });
@@ -241,6 +264,86 @@ test('DeepSeek: JSON sem raciocínio, nova tentativa quando volta vazio, saldo e
   await assert.rejects(deepseek.test(cfgOf(deepseek)), /chave de API inválida/);
   reply(402, { error: { message: 'Insufficient Balance', type: 'unknown_error', code: 'invalid_request_error' } });
   await assert.rejects(deepseek.writeJson(cfgOf(deepseek), { system: 's', user: 'u' }), /sem créditos/);
+});
+
+// ================================================================= OpenRouter
+test('OpenRouter: roteiro com Llama 3 pelo fornecedor mais barato e teste da chave', async () => {
+  reply(200, { choices: [{ message: { content: '{"uso":"a","posse":"b","especificacoes":"c","video":"d"}' } }] });
+  const out = await openrouter.writeJson(cfgOf(openrouter), { system: 's', user: 'u' });
+  assert.equal(out.uso, 'a');
+  const c = calls[0];
+  assert.equal(c.url, 'https://openrouter.ai/api/v1/chat/completions');
+  assert.equal(c.headers.Authorization, 'Bearer chave-xyz');
+  assert.equal(c.body.model, 'meta-llama/llama-3.3-70b-instruct');
+  assert.deepEqual([c.body.response_format, c.body.provider], [{ type: 'json_object' }, { sort: 'price' }]);
+  assert.ok(openrouter.recommended.text.includes('meta-llama/llama-3.1-8b-instruct') && openrouter.recommended.text.some((m) => m.startsWith('qwen/')), 'Llama 3 e Qwen pequeno recomendados');
+  assert.deepEqual(c.body.plugins, [{ id: 'response-healing' }]);
+  // Falha do modelo com HTTP 200 (corpo só com "error").
+  reply(200, { error: { code: 502, message: 'Provider returned error' } });
+  await assert.rejects(openrouter.writeJson(cfgOf(openrouter), { system: 's', user: 'u' }), (e) => /Provider returned error/.test(e.message) && e.retryable);
+  calls.length = 1;
+
+  reply(200, { data: { label: 'azurehub', limit: 10, limit_remaining: 7.5, usage: 2.5, is_free_tier: false } });
+  const t = await openrouter.test(cfgOf(openrouter, { sort: 'latency' }));
+  assert.equal(calls[1].url, 'https://openrouter.ai/api/v1/key');
+  assert.equal(t.account, 'azurehub · crédito restante US$ 7.50');
+  reply(402, { error: { code: 402, message: 'Insufficient credits. Add more using https://openrouter.ai/credits' } });
+  await assert.rejects(openrouter.writeJson(cfgOf(openrouter), { system: 's', user: 'u' }), /sem créditos/);
+});
+
+test('OpenRouter: fotos pela rota de imagens com referências (data URL), no limite de cada modelo', async () => {
+  openrouter._resetVideoModels();
+  reply(200, { id: 'google/gemini-nano-banana-2.1', endpoints: [{ supported_parameters: { aspect_ratio: { type: 'enum', values: ['1:1', '3:4', '4:5', '9:16'] }, input_references: { type: 'range', min: 0, max: 14 } } }] });
+  reply(200, { created: 1, data: [{ b64_json: JPG.toString('base64'), media_type: 'image/jpeg' }] });
+  const out = await openrouter.image(cfgOf(openrouter), { prompt: 'influencer usando', refs: [ref('persona'), ref(1)], aspect: '4:5' });
+  assert.ok(out.buffer.equals(JPG));
+  assert.equal(calls[0].url, 'https://openrouter.ai/api/v1/images/models/google/gemini-nano-banana-2.1/endpoints');
+  const c = calls[1];
+  assert.equal(c.url, 'https://openrouter.ai/api/v1/images');
+  assert.deepEqual([c.body.model, c.body.aspect_ratio, c.body.n], ['google/gemini-nano-banana-2.1', '4:5', 1]);
+  assert.equal(c.body.input_references.length, 2);
+  assert.equal(c.body.input_references[0].type, 'image_url');
+  assert.match(c.body.input_references[0].image_url.url, /^data:image\/jpeg;base64,/);
+
+  // Grok Imagine: até 3 referências e sem 4:5 → 3:4.
+  const grok = { ...cfgOf(openrouter), models: { image: 'x-ai/grok-imagine-image-2.0' } };
+  reply(200, { id: 'x-ai/grok-imagine-image-2.0', endpoints: [{ supported_parameters: { aspect_ratio: { type: 'enum', values: ['1:1', '3:4', '4:3', '9:16', '16:9', 'auto'] }, input_references: { type: 'range', min: 0, max: 3 } } }] });
+  reply(200, { created: 1, data: [{ b64_json: JPG.toString('base64') }] });
+  await openrouter.image(grok, { prompt: 'x', refs: [ref('persona'), ref(1), ref(2), ref(3)], aspect: '4:5' });
+  const g = calls.at(-1).body;
+  assert.deepEqual([g.input_references.length, g.aspect_ratio], [3, '3:4']);
+});
+
+test('OpenRouter: vídeo com duração ajustada ao modelo, consulta e download só do OpenRouter', async () => {
+  reply(200, { data: [{ id: 'google/veo-3.1-fast', supported_durations: [4, 6, 8], supported_aspect_ratios: ['16:9', '9:16'] }] });
+  reply(200, { id: 'gen-vid-1-abcdefghijklmnopqrst', polling_url: 'https://openrouter.ai/api/v1/videos/gen-vid-1-abcdefghijklmnopqrst', status: 'pending' });
+  const cfg = { ...cfgOf(openrouter), models: { video: 'google/veo-3.1-fast' } };
+  const { job } = await openrouter.startVideo(cfg, { prompt: 'fala com CTA', refs: [ref('persona'), ref(1)], seconds: 7, aspect: '9:16' });
+  assert.equal(job, 'gen-vid-1-abcdefghijklmnopqrst');
+  const c = calls[1];
+  assert.equal(c.url, 'https://openrouter.ai/api/v1/videos');
+  assert.deepEqual([c.body.duration, c.body.aspect_ratio, c.body.resolution, c.body.generate_audio], [6, '9:16', '720p', true], '7 s → 6 s (a mais próxima aceita)');
+  assert.equal(c.body.input_references.length, 2);
+  assert.match(c.body.input_references[0].image_url.url, /^https:\/\/site\.test\//, 'foto do produto vai pela URL pública');
+
+  reply(200, { id: job, status: 'in_progress', polling_url: 'x' });
+  assert.deepEqual(await openrouter.checkVideo(cfg, job), { status: 'running' });
+  const mp4 = Buffer.from('mp4-or');
+  reply(200, { id: job, status: 'completed', polling_url: 'x', unsigned_urls: [`https://openrouter.ai/api/v1/videos/${job}/content?index=0`] });
+  reply(200, mp4, { 'Content-Type': 'video/mp4' });
+  const done = await openrouter.checkVideo(cfg, job);
+  assert.ok(done.buffer.equals(mp4));
+  assert.equal(calls.at(-1).headers.Authorization, 'Bearer chave-xyz', 'o link de download não é assinado: vai com a chave');
+  reply(200, { id: job, status: 'completed', polling_url: 'x', unsigned_urls: ['https://evil.test/v.mp4'] });
+  assert.match((await openrouter.checkVideo(cfg, job)).error, /endereço de download inesperado/);
+  reply(200, { id: job, status: 'failed', polling_url: 'x', error: 'Content policy violation' });
+  assert.deepEqual(await openrouter.checkVideo(cfg, job), { status: 'error', error: 'OpenRouter: Content policy violation' });
+
+  // Modelo que não faz vertical: erro claro antes de gastar.
+  const wide = { ...cfgOf(openrouter), models: { video: 'minimax/hailuo-2.3' } };
+  openrouter._resetVideoModels();
+  reply(200, { data: [{ id: 'minimax/hailuo-2.3', supported_durations: [6, 10], supported_aspect_ratios: ['16:9'] }] });
+  await assert.rejects(openrouter.startVideo(wide, { prompt: 'x', refs: [ref(1)], seconds: 8, aspect: '9:16' }), /não gera vídeo 9:16/);
 });
 
 test('tipo real da foto pelos primeiros bytes', () => {

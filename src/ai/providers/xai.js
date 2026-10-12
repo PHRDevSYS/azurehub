@@ -4,7 +4,7 @@
 // produto, fala com sincronia labial, até 15 s) e roteiro com Grok.
 // Docs: https://docs.x.ai/developers/rest-api-reference/inference/images
 //       https://docs.x.ai/developers/model-capabilities/video/reference-to-video
-const { AiError, request, fromBase64, dataUri, parseJsonText } = require('./http');
+const { AiError, request, chatContent, fromBase64, dataUri, parseJsonText, COMMON_MIMES } = require('./http');
 
 const BASE = 'https://api.x.ai/v1';
 const NAME = 'xAI';
@@ -30,6 +30,7 @@ module.exports = {
     video: ['grok-imagine-video-1.5', 'grok-imagine-video-1.5-lite', 'grok-imagine-video'],
   },
   defaults: { text: 'grok-4.3', image: 'grok-imagine-image-2.0', video: 'grok-imagine-video-1.5' },
+  acceptMimes: COMMON_MIMES,
   fields: [
     { key: 'resolution', label: 'Resolução das fotos', type: 'select', options: [['1k', '1K'], ['2k', '2K']] },
     { key: 'videoResolution', label: 'Resolução do vídeo', type: 'select', help: 'Com imagens de referência, o máximo é 720p',
@@ -49,7 +50,7 @@ module.exports = {
       method: 'POST', headers: headers(cfg), timeoutMs: 180000,
       json: { model: cfg.models.text, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] },
     });
-    return parseJsonText(data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content);
+    return parseJsonText(chatContent(NAME, data));
   },
 
   async image(cfg, { prompt, refs, persona, aspect }) {

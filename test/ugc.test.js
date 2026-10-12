@@ -17,6 +17,7 @@ const providers = require('../src/ai/providers');
 const runner = require('../src/ugc/runner');
 const agent = require('../src/ugc/agent');
 const { normalizeProduct } = require('../src/source/normalize');
+const { AiError } = require('../src/ai/providers/http');
 
 const realFetch = global.fetch;
 let server;
@@ -48,6 +49,7 @@ const fake = providers.register({
   async image(cfg, { prompt, refs, persona, aspect }) {
     seen.image.push({ model: cfg.models.image, prompt, refs: refs.map((r) => r.url), persona, aspect });
     if (/BLOQUEIA/.test(prompt)) throw new Error('IA Simulada: o pedido foi bloqueado pela política de conteúdo');
+    if (/OCUPADO/.test(prompt) && fake.busy-- > 0) throw new AiError('IA Simulada: limite de uso atingido', { status: 429, retryable: true });
     return { buffer: PNG, mime: 'image/png' };
   },
   async startVideo(cfg, { prompt, refs, persona, seconds, aspect }) {
@@ -69,9 +71,11 @@ providers.register({
 
 test.before(async () => {
   runner.timing.pollMs = 5;
+  runner.timing.retryMs = [1, 1];
   global.fetch = async (url, init) => {
     const u = new URL(String(url));
     if (u.hostname === 'site.test') return new Response(Buffer.alloc(1024, 7), { headers: { 'Content-Type': 'image/jpeg' } });
+    if (u.hostname === 'heic.test') return new Response(Buffer.concat([Buffer.from('000000186674797068656963', 'hex'), Buffer.alloc(64)]), { headers: { 'Content-Type': 'image/heic' } });
     return realFetch(url, init);
   };
   server = createServer();
@@ -333,4 +337,21 @@ test('vários produtos de uma vez: usa os prompts editados de cada um e gera os 
   const cop = items.filter((x) => x.sku === 'COP');
   assert.ok(cop.every((x) => x.prompt.length > 40));
   assert.equal((await call('POST', '/api/ugc/batch', { skus: [], gender: 'feminino' })).status, 400);
+});
+
+test('limite de uso do provedor: espera e tenta de novo; foto em formato recusado explica o motivo', async () => {
+  fake.busy = 1;
+  const before = seen.image.length;
+  await call('POST', '/api/ugc/GAR/generate', { gender: 'feminino', items: [{ kind: 'especificacoes', prompt: 'OCUPADO na primeira vez: arte com especificações da garrafa.' }] });
+  const now = Object.fromEntries((await untilDone('GAR')).map((x) => [x.kind, x]));
+  assert.equal(now.especificacoes.status, 'done');
+  assert.equal(seen.image.length - before, 2, 'uma nova tentativa depois do 429');
+
+  await realFetch(`${base}/api/v1/products`, { method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({
+    sku: 'HEIC', title: 'Caneca de cerâmica 350 ml', price: 39.9, stock: 3, images: ['https://heic.test/c1.heic'],
+  }) });
+  await call('POST', '/api/ugc/HEIC/generate', { gender: 'feminino', items: [{ kind: 'uso', prompt: 'Influencer tomando café na caneca, foto vertical.' }] });
+  const heic = Object.fromEntries((await untilDone('HEIC')).map((x) => [x.kind, x]));
+  assert.equal(heic.uso.status, 'error');
+  assert.match(heic.uso.error, /image\/heic, formato que este modelo não aceita/);
 });

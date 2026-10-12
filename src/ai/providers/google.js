@@ -56,6 +56,7 @@ module.exports = {
     video: ['gemini-omni-1.1-flash'],
   },
   defaults: { text: 'gemini-3.6-flash', image: 'gemini-nano-banana-2.1', video: 'gemini-omni-1.1-flash' },
+  acceptMimes: IMAGE_MIMES,
   fields: [
     { key: 'imageSize', label: 'Tamanho das fotos', type: 'select', options: [['1K', '1K (928×1152)'], ['2K', '2K (1856×2304)']] },
     { key: 'resolution', label: 'Resolução do vídeo', type: 'select', help: '1080p sai mais caro e demora mais',

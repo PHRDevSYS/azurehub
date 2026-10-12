@@ -4,7 +4,7 @@
 // UGC, combine com outro provedor nas funções de foto/vídeo.
 // Docs: https://api-docs.deepseek.com/api/create-chat-completion
 //       https://api-docs.deepseek.com/guides/json_mode
-const { AiError, request, parseJsonText } = require('./http');
+const { AiError, request, chatContent, parseJsonText } = require('./http');
 
 const BASE = 'https://api.deepseek.com';
 const NAME = 'DeepSeek';
@@ -25,10 +25,8 @@ async function chat(cfg, { system, user }) {
     },
   });
   const choice = (data.choices || [])[0] || {};
-  if (choice.finish_reason === 'length') throw new AiError(`${NAME}: a resposta foi cortada pelo limite de tokens`);
-  if (choice.finish_reason === 'content_filter') throw new AiError(`${NAME}: o pedido foi bloqueado pela política de conteúdo — ajuste os dados`);
   if (['insufficient_system_resource', 'aborted'].includes(choice.finish_reason)) throw new AiError(`${NAME}: servidor sobrecarregado; tente de novo`, { retryable: true });
-  return choice.message && choice.message.content;
+  return chatContent(NAME, data);
 }
 
 module.exports = {

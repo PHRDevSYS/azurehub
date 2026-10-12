@@ -15,7 +15,7 @@ function register(p) {
   return p;
 }
 
-for (const p of [require('./openai'), require('./google'), require('./xai'), require('./deepseek')]) register(p);
+for (const p of [require('./openai'), require('./google'), require('./xai'), require('./deepseek'), require('./openrouter')]) register(p);
 
 const can = (p, kind) => !!(p && (kind === 'video' ? p.startVideo : kind === 'text' ? p.writeJson : p.image));
 

@@ -16,11 +16,12 @@ const { download } = require('../lib/media');
 const ai = require('../ai/settings');
 const providers = require('../ai/providers');
 const agent = require('./agent');
-const { sniffImage } = require('../ai/providers/http');
+const { sniffImage, COMMON_MIMES } = require('../ai/providers/http');
 
 const DIR = path.join(config.dataDir, 'ugc');
 const REF_MAX = 3;
-const timing = { sleep: (ms) => new Promise((ok) => setTimeout(ok, ms)), pollMs: 10000, maxWaitMs: 25 * 60e3, personaWaitMs: 10 * 60e3 };
+const timing = { sleep: (ms) => new Promise((ok) => setTimeout(ok, ms)), pollMs: 10000, maxWaitMs: 25 * 60e3, personaWaitMs: 10 * 60e3, retryMs: [5000, 20000] };
+const PERSONA_MAX = 10 * 1024 * 1024;
 const LIMIT = { image: 2, video: 2 };
 const busy = { image: 0, video: 0 };
 const waiting = { image: [], video: [] };
@@ -48,20 +49,38 @@ function fail(id, e) {
   if (item) store.log('error', `Mídia UGC (${item.kind}): ${e.message || e}`, { sku: item.sku });
 }
 
-// Fotos de referência: as do produto (e das variações), as primeiras.
-async function references(p) {
-  const urls = [...new Set([...(p.images || []), ...(p.variants || []).flatMap((v) => v.images || [])])].slice(0, REF_MAX);
+// Fotos de referência: as do produto (e das variações), as primeiras que o
+// provedor aceita (formato) — uma foto HEIC/AVIF não derruba a geração.
+async function references(p, accept = COMMON_MIMES) {
+  const urls = [...new Set([...(p.images || []), ...(p.variants || []).flatMap((v) => v.images || [])])].slice(0, 8);
   const out = [];
+  const refused = new Set();
   for (const url of urls) {
+    if (out.length >= REF_MAX) break;
     try {
       const f = await download(url, { kind: 'image', maxBytes: 10 * 1024 * 1024 });
       const mime = sniffImage(f.buffer) || (/^image\//.test(f.contentType) ? f.contentType : null);
       if (!mime) continue; // não é imagem
+      if (!accept.includes(mime)) { refused.add(mime); continue; }
       out.push({ url, buffer: f.buffer, mime, name: f.name });
     } catch { /* foto inacessível: segue com as outras */ }
   }
+  if (!out.length && refused.size) throw new Error(`as fotos do produto estão em ${[...refused].join(', ')}, formato que este modelo não aceita; use JPG, PNG ou WebP na origem`);
   if (!out.length) throw new Error('nenhuma foto do produto pôde ser baixada para servir de referência');
   return out;
+}
+
+// Erro temporário do provedor (limite de uso, sobrecarga, rede): espera e
+// tenta de novo, até 2 vezes. Falta de crédito ou bloqueio de conteúdo não.
+async function retrying(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!e.retryable || attempt >= timing.retryMs.length) throw e;
+      await timing.sleep(Math.min(60000, e.retryAfter ? e.retryAfter * 1000 : timing.retryMs[attempt]));
+    }
+  }
 }
 
 function save(item, buffer, mime) {
@@ -74,7 +93,7 @@ function save(item, buffer, mime) {
 
 // Foto 1 (influencer usando o produto) do mesmo gênero, para as mídias 2 e 4
 // terem a mesma pessoa. Se ela ainda está sendo gerada, espera um pouco.
-async function persona(item) {
+async function persona(item, accept = COMMON_MIMES) {
   const started = Date.now();
   for (;;) {
     const uso = store.ugcLatestOf(item.sku, 'uso');
@@ -85,8 +104,10 @@ async function persona(item) {
   }
   const done = store.ugcLatestOf(item.sku, 'uso', { status: 'done', gender: item.gender });
   const file = filePath(done);
-  if (!file) return null;
-  return { url: `ugc:${done.id}`, buffer: fs.readFileSync(file), mime: done.mime || 'image/png', name: path.basename(file) };
+  if (!file || fs.statSync(file).size > PERSONA_MAX) return null;
+  const buffer = fs.readFileSync(file);
+  const mime = sniffImage(buffer) || done.mime || 'image/png';
+  return accept.includes(mime) ? { url: `ugc:${done.id}`, buffer, mime, name: path.basename(file) } : null;
 }
 
 async function work(id) {
@@ -99,9 +120,10 @@ async function work(id) {
   // tela Agentes de IA mude depois.
   const { provider, cfg } = ai.connection(item.provider, { [slot]: item.model });
   if (!providers.can(provider, slot)) throw new Error(`${provider.name} não gera ${slot === 'video' ? 'vídeos' : 'imagens'}`);
+  const accept = provider.acceptMimes || COMMON_MIMES;
   const inputs = async () => {
-    const products = await references(prod.data);
-    const face = ['posse', 'video'].includes(item.kind) ? await persona(item) : null;
+    const products = await references(prod.data, accept);
+    const face = ['posse', 'video'].includes(item.kind) ? await persona(item, accept) : null;
     const refs = face ? [face, ...products] : products;
     const prompt = `${item.prompt}\n\n${agent.referenceNote(item.kind, { persona: !!face, products: products.length })}`;
     return { refs, prompt, persona: !!face };
@@ -109,7 +131,7 @@ async function work(id) {
   if (slot === 'image') {
     store.ugcUpdate(id, { status: 'running' });
     const { refs, prompt, persona: hasPersona } = await inputs();
-    const out = await provider.image(cfg, { prompt, refs, persona: hasPersona, aspect: '4:5' });
+    const out = await retrying(() => provider.image(cfg, { prompt, refs, persona: hasPersona, aspect: '4:5' }));
     save(item, out.buffer, out.mime);
     return;
   }
@@ -117,14 +139,14 @@ async function work(id) {
   if (!job) {
     store.ugcUpdate(id, { status: 'running' });
     const { refs, prompt, persona: hasPersona } = await inputs();
-    const out = await provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.options('midia').videoSeconds, aspect: '9:16' });
+    const out = await retrying(() => provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.options('midia').videoSeconds, aspect: '9:16' }));
     if (out.buffer) { save(item, out.buffer, out.mime || 'video/mp4'); return; } // provedor que responde na hora
     job = out.job;
     store.ugcUpdate(id, { job: String(job) });
   }
   const started = Date.now();
   for (;;) {
-    const st = await provider.checkVideo(cfg, job);
+    const st = await retrying(() => provider.checkVideo(cfg, job));
     if (st.status === 'done') { save(item, st.buffer, st.mime || 'video/mp4'); return; }
     if (st.status === 'error') throw new Error(st.error || 'o provedor não conseguiu gerar o vídeo');
     if (Date.now() - started > timing.maxWaitMs) throw new Error('o vídeo não ficou pronto a tempo; gere de novo');
