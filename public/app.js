@@ -1194,7 +1194,7 @@ function drawUgc() {
   const u = state.ugc;
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
-    <div class="status-line">${ugcModelLine()} <button class="ghost" id="ugc-cfg">${u.configOpen ? 'Ocultar' : 'Trocar modelo'}</button></div>
+    <div class="status-line">${ugcModelLine()} <button class="ghost" id="ugc-cfg">${u.configOpen ? 'Ocultar' : 'Modelos de IA'}</button></div>
     ${u.configOpen ? ugcConfigForm() : ''}
     ${u.skus.length > 1 ? `<div class="pv-tabs" style="padding-left:0">${u.skus.map((s) => `<button data-ugc-sku="${esc(s)}" class="${s === u.sku ? 'on' : ''}">${esc(s)}</button>`).join('')}</div>` : ''}
     <div class="ugc-controls">
@@ -1202,6 +1202,7 @@ function drawUgc() {
         ${['feminino', 'masculino'].map((g) => `<label class="switch"><input type="radio" name="ugc-gender" value="${g}" ${u.gender === g ? 'checked' : ''}> ${g === 'feminino' ? 'Feminino' : 'Masculino'}</label>`).join('')}</span>
       <button id="ugc-plan">Criar roteiro com o agente</button>
       <button id="ugc-all" class="primary">Gerar as 4 mídias</button>
+      ${u.skus.length > 1 ? `<button id="ugc-batch">Gerar para os ${u.skus.length} produtos</button>` : ''}
     </div>
     <p class="muted" id="ugc-note"></p>
     <div class="ugc-grid" id="ugc-grid"></div>
@@ -1216,6 +1217,15 @@ function drawUgc() {
     drawUgcCards(r.items, true);
   });
   body.querySelector('#ugc-all').onclick = (e) => busy(e.target, () => ugcGenerate(['uso', 'posse', 'especificacoes', 'video']));
+  const batch = body.querySelector('#ugc-batch');
+  if (batch) {
+    batch.onclick = (e) => busy(e.target, async () => {
+      if (!confirm(`Gerar as 4 mídias (3 fotos e 1 vídeo) para ${u.skus.length} produtos com influencer ${u.gender}? Cada geração é cobrada pelo provedor de IA.`)) return;
+      const r = await api('/api/ugc/batch', { method: 'POST', body: { skus: u.skus, gender: u.gender } });
+      toast(`${r.queued} mídias de ${r.products} produtos na fila — acompanhe em cada aba`);
+      setTimeout(() => loadUgc().catch(() => {}), 1500);
+    });
+  }
   if (u.configOpen) wireUgcConfig(body);
 }
 

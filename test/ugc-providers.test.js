@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 
 const openai = require('../src/ugc/providers/openai');
 const google = require('../src/ugc/providers/google');
+const xai = require('../src/ugc/providers/xai');
 const { sniffImage } = require('../src/ugc/providers/http');
 
 const realFetch = global.fetch;
@@ -159,6 +160,58 @@ test('Google: roteiro em JSON e teste da chave', async () => {
   await assert.rejects(google.test(cfgOf(google)), /chave de API inválida/);
   reply(402, { error: { code: 'payment_required', message: 'Prepaid credits exhausted' } });
   await assert.rejects(google.image(cfgOf(google), { prompt: 'x', refs: [ref(1)], aspect: '4:5' }), /sem créditos/);
+});
+
+// ======================================================================== xAI
+test('xAI: foto com Grok Imagine (várias referências com etiquetas, 3:4) e erro de chave', async () => {
+  reply(200, { data: [{ b64_json: JPG.toString('base64'), mime_type: 'image/jpeg' }] });
+  const out = await xai.image(cfgOf(xai), { prompt: 'influencer segurando', refs: [ref('persona'), ref(1), ref(2)], persona: true, aspect: '4:5' });
+  assert.ok(out.buffer.equals(JPG));
+  const c = calls[0];
+  assert.equal(c.url, 'https://api.x.ai/v1/images/edits');
+  assert.equal(c.headers.Authorization, 'Bearer chave-xyz');
+  assert.equal(c.body.model, 'grok-imagine-image-2.0');
+  assert.equal(c.body.aspect_ratio, '3:4', 'sem 4:5 no Grok: o mais próximo');
+  assert.equal(c.body.response_format, 'b64_json');
+  assert.equal(c.body.images.length, 3);
+  assert.match(c.body.images[0].url, /^data:image\/jpeg;base64,/);
+  assert.match(c.body.prompt, /<IMAGE_0> = o\(a\) influencer; <IMAGE_1> = foto do produto; <IMAGE_2> = foto do produto/);
+
+  reply(400, { code: 'invalid-argument', error: 'Incorrect API key provided. You can obtain an API key from https://console.x.ai.' });
+  await assert.rejects(xai.test(cfgOf(xai)), /chave de API inválida/);
+});
+
+test('xAI: vídeo por referência (pessoa + produto), consulta e download', async () => {
+  reply(200, { request_id: 'req-1' });
+  const { job } = await xai.startVideo(cfgOf(xai), { prompt: 'fala com CTA', refs: [ref('persona'), ref(1)], persona: true, seconds: 20, aspect: '9:16' });
+  assert.equal(job, 'req-1');
+  const c = calls[0];
+  assert.equal(c.url, 'https://api.x.ai/v1/videos/generations');
+  assert.deepEqual([c.body.model, c.body.duration, c.body.aspect_ratio, c.body.resolution], ['grok-imagine-video-1.5', 15, '9:16', '720p']);
+  assert.equal(c.body.reference_images.length, 2);
+  assert.equal(c.body.image, undefined, 'referência, não primeiro quadro');
+
+  reply(200, { status: 'pending', progress: 40 });
+  assert.deepEqual(await xai.checkVideo(cfgOf(xai), job), { status: 'running' });
+  const mp4 = Buffer.from('mp4-grok');
+  reply(200, { status: 'done', video: { url: 'https://vidgen.x.ai/abc/video.mp4', duration: 15, respect_moderation: true } });
+  reply(200, mp4, { 'Content-Type': 'video/mp4' });
+  const done = await xai.checkVideo(cfgOf(xai), job);
+  assert.equal(done.status, 'done');
+  assert.ok(done.buffer.equals(mp4));
+  assert.equal(calls.at(-1).url, 'https://vidgen.x.ai/abc/video.mp4');
+
+  reply(200, { status: 'done', video: { url: '', respect_moderation: false } });
+  assert.match((await xai.checkVideo(cfgOf(xai), job)).error, /política de conteúdo/);
+  reply(200, { status: 'failed', error: { code: 'internal_error', message: 'Engine error' } });
+  assert.deepEqual(await xai.checkVideo(cfgOf(xai), job), { status: 'error', error: 'xAI: Engine error' });
+});
+
+test('xAI: roteiro pelo chat (JSON no texto)', async () => {
+  reply(200, { choices: [{ message: { content: 'Aqui está: {"uso":"a","posse":"b","especificacoes":"c","video":"d"}' } }] });
+  const out = await xai.writeJson(cfgOf(xai), { system: 's', user: 'u' });
+  assert.equal(out.posse, 'b');
+  assert.deepEqual([calls[0].url, calls[0].body.model], ['https://api.x.ai/v1/chat/completions', 'grok-4.3']);
 });
 
 test('tipo real da foto pelos primeiros bytes', () => {

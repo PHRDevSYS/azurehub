@@ -85,6 +85,9 @@ test.before(async () => {
     attributes: { Material: 'Aço inox', Capacidade: '1 L' },
     images: ['https://site.test/g1.jpg', 'https://site.test/g2.jpg', 'https://site.test/g3.jpg', 'https://site.test/g4.jpg'],
   }) });
+  await realFetch(`${base}/api/v1/products`, { method: 'POST', headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({
+    sku: 'COP', title: 'Copo Térmico 500 ml', price: 79.9, stock: 9, description: 'Mantém o café quente por 6 horas.', images: ['https://site.test/c1.jpg'],
+  }) });
 });
 
 test.after(() => {
@@ -291,4 +294,25 @@ test('ao reiniciar, vídeo em andamento continua do job salvo (sem gerar de novo
   const item = store.ugcGet(id);
   assert.equal(item.status, 'done');
   assert.equal(seen.video.length, startsBefore, 'não chamou startVideo de novo');
+});
+
+test('vários produtos de uma vez: usa os prompts editados de cada um e gera os que faltam pelo agente', async () => {
+  const edited = 'Prompt editado na tela: influencer usando a garrafa na trilha, produto idêntico às fotos.';
+  await call('POST', '/api/ugc/GAR/generate', { gender: 'feminino', items: [{ kind: 'uso', prompt: edited }] });
+  await untilDone('GAR');
+  const before = seen.image.length;
+  const r = await call('POST', '/api/ugc/batch', { skus: ['GAR', 'COP', 'NAOEXISTE', 'COP'], gender: 'feminino' });
+  assert.deepEqual(r.body, { products: 2, queued: 8 });
+  let items;
+  for (let i = 0; i < 300; i++) {
+    items = [...(await call('GET', '/api/ugc/GAR')).body.items, ...(await call('GET', '/api/ugc/COP')).body.items];
+    if (seen.image.length - before >= 6 && items.every((x) => x.status === 'done')) break;
+    await wait(10);
+  }
+  assert.ok(items.every((x) => x.status === 'done'), JSON.stringify(items.map((x) => [x.sku, x.kind, x.status])));
+  const gar = Object.fromEntries(items.filter((x) => x.sku === 'GAR').map((x) => [x.kind, x]));
+  assert.equal(gar.uso.prompt, edited, 'mantém o prompt que o usuário editou');
+  const cop = items.filter((x) => x.sku === 'COP');
+  assert.ok(cop.every((x) => x.prompt.length > 40));
+  assert.equal((await call('POST', '/api/ugc/batch', { skus: [], gender: 'feminino' })).status, 400);
 });

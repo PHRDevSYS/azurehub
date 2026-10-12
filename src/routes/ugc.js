@@ -36,6 +36,8 @@ function itemsOf(sku) {
   });
 }
 
+const validPrompt = (t) => { const n = String(t || '').trim().length; return n >= 20 && n <= 8000; };
+
 function productOr404(sku) {
   const prod = store.getProduct(sku);
   if (!prod) throw new HttpError(404, 'Produto não encontrado');
@@ -87,12 +89,41 @@ function register(r, { requireAdmin }) {
     if (!list.length) throw new Error('Nada para gerar');
     for (const it of list) {
       it.prompt = String(it.prompt || '').trim();
-      if (it.prompt.length < 20) throw new Error(`Prompt de "${agent.LABELS[it.kind]}" está vazio ou curto demais`);
-      if (it.prompt.length > 8000) throw new Error(`Prompt de "${agent.LABELS[it.kind]}" passa de 8000 caracteres`);
+      if (!validPrompt(it.prompt)) throw new Error(`Prompt de "${agent.LABELS[it.kind]}" ${it.prompt.length < 20 ? 'está vazio ou curto demais' : 'passa de 8000 caracteres'}`);
     }
     const ids = runner.generate({ sku: prod.sku, gender, items: list });
     store.log('info', `Mídia UGC: ${ids.length} geração(ões) na fila`, { sku: prod.sku });
     return { queued: ids.length, items: itemsOf(prod.sku) };
+  }));
+
+  // Vários produtos de uma vez (os selecionados na Prévia): usa os prompts que
+  // já estão na tela de cada um (mesmo gênero) ou pede o roteiro ao agente, e
+  // enfileira as 4 mídias. Roda em segundo plano; a tela acompanha pela fila.
+  r.post('/api/ugc/batch', requireAdmin, wrap(async (ctx) => {
+    const { skus, gender } = await readJson(ctx.req);
+    if (!GENDERS.includes(gender)) throw new Error('Escolha o gênero do(a) influencer: feminino ou masculino');
+    const list = [...new Set(Array.isArray(skus) ? skus.map(String) : [])].filter((sku) => store.getProduct(sku));
+    if (!list.length) throw new Error('Nenhum produto selecionado');
+    if (list.length > 50) throw new Error('No máximo 50 produtos por vez');
+    settings.active({ kind: 'image' });
+    settings.active({ kind: 'video' });
+    (async () => {
+      for (const sku of list) {
+        try {
+          const latest = Object.fromEntries(store.ugcLatest(sku).filter((x) => x.gender === gender && validPrompt(x.prompt)).map((x) => [x.kind, x.prompt.trim()]));
+          let prompts = latest;
+          if (agent.KINDS.some((k) => !latest[k])) {
+            const { provider, cfg } = settings.writer() || { provider: { name: 'AzureHub' }, cfg: { models: {} } };
+            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: settings.get().videoSeconds })).prompts, ...latest };
+          }
+          runner.generate({ sku, gender, items: agent.KINDS.map((kind) => ({ kind, prompt: prompts[kind] })) });
+        } catch (e) {
+          store.log('error', `Mídia UGC: ${e.message}`, { sku });
+        }
+      }
+    })();
+    store.log('info', `Mídia UGC: ${list.length} produto(s) na fila (4 mídias cada)`);
+    return { products: list.length, queued: list.length * agent.KINDS.length };
   }));
 
   // Arquivo gerado (imagem ou vídeo).
