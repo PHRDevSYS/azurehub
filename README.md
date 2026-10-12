@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.5.1-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.6.0-beta.1).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -274,6 +274,17 @@ Em todos, cadastre no app do desenvolvedor a **URL de retorno** exibida no card:
 - Informe **App ID** e **Chave secreta**; escopos `read`, `write`, `offline_access`.
 - Categoria: usa `category_ml` do produto, depois a categoria padrão do card e,
   se nenhuma existir, **prevê pelo título** (`domain_discovery`).
+- **Atributos da categoria** (`/categories/{id}/attributes`): os `attributes`
+  do produto podem vir pelo **nome** ("Gênero", "Tipo de manga") ou pelo id
+  do ML (`GENDER`) e são convertidos conforme o tipo — lista (só valores da
+  lista; o erro mostra as opções), sim/não (pelo id), número com unidade
+  (`"128GB"` → `128 GB`, só unidades aceitas), número e texto (até o limite
+  de caracteres). Obrigatórios (`required`, `new_required` e os
+  condicionais, conferidos em `/attributes/conditional`) faltando **barram a
+  criação** com a lista do que falta; num anúncio já publicado viram aviso e
+  preço/estoque seguem atualizando.
+- **Dimensões do pacote** vão também como `SELLER_PACKAGE_HEIGHT/WIDTH/LENGTH/
+  WEIGHT` (inteiros em cm e g), exigidos para vendedores ME2.
 - Promoção: campanha própria do vendedor (`PRICE_DISCOUNT`, `deal_price`),
   de no máximo **14 dias** (regra do ML): sem data de fim, ou com fim mais
   longe, o hub pede 14 dias e renova quando a campanha termina. Só recria
@@ -519,7 +530,7 @@ public/                  painel: Integração, Produtos, Precificação, Prévia
 test/                    node:test (APIs simuladas no formato oficial)
 ```
 
-Testes: `npm test` — 115 casos: conectores de origem (Bling, WooCommerce,
+Testes: `npm test` — 124 casos: conectores de origem (Bling, WooCommerce,
 Shopify, Nuvemshop, banco), fluxo do painel pela API (captura → seleção →
 prévia → envio → sincronização → pausa), publicação e prévia nas três
 plataformas — na Shopee com cenários de **tênis** (2 níveis de variação, GTIN
@@ -529,7 +540,8 @@ padronizado/livre, marca desconhecida, GTIN "00") e **utensílio doméstico**
 **Mercado Livre** (modelo clássico e User Products, troca automática entre
 eles, sem duplicar anúncio) e no **TikTok Shop** (atributos de venda padrão ou
 personalizados, foto por cor, SKU nova/removida por edição parcial, estoque 0,
-promoção por SKU), backoff e falha parcial; e a Precificação: similaridade, `robots.txt`, cada fonte de
+promoção por SKU), atributos do Mercado Livre com os atributos **reais** de
+duas categorias (camisetas e celulares), backoff e falha parcial; e a Precificação: similaridade, `robots.txt`, cada fonte de
 pesquisa com respostas simuladas (inclusive o trabalhador Scrapling), regras
 de piso/teto/arredondamento, aplicação em massa, preço efetivo no envio
 (acompanhando origem e custo) e reenvio automático dos produtos já publicados,
@@ -545,8 +557,6 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
       a chamada real). Na Shopee, conferir em especial o endpoint de variações
       padronizadas (a referência cita `get_variation_tree` e os exemplos
       `get_variations`; o hub tenta os dois) e a estrutura livre de variação.
-- [ ] **Atributos obrigatórios por categoria** no Mercado Livre (TikTok e
-      Shopee já consultam e validam).
 - [ ] **Variações no ML e no TikTok com contas reais**: conferir no sandbox/
       usuário de teste o modelo User Products do ML (agrupamento em família) e,
       na TikTok, se a loja aceita estoque 0 por SKU e a troca de produto simples

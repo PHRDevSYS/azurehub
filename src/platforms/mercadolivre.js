@@ -5,6 +5,7 @@
 const { requestJson, PlatformError, youtubeId } = require('../lib/media');
 const { sha256 } = require('../lib/crypto');
 const H_ = require('./preview-helpers');
+const MA = require('./ml-attributes');
 
 const API = 'https://api.mercadolibre.com';
 const AUTH_HOSTS = {
@@ -74,19 +75,16 @@ module.exports = {
     }
     if (p.videos.length && !videoId) warnings.push('Mercado Livre: só vídeos do YouTube são enviados no beta (clips ficam para a próxima versão)');
 
-    const attributes = [{ id: 'SELLER_SKU', value_name: p.sku }];
-    if (p.brand) attributes.push({ id: 'BRAND', value_name: String(p.brand) });
-    if (p.model) attributes.push({ id: 'MODEL', value_name: String(p.model) });
-    if (p.gtin) attributes.push({ id: 'GTIN', value_name: String(p.gtin) });
-    else attributes.push({ id: 'EMPTY_GTIN_REASON', value_id: '17055160' }); // "O produto não tem código cadastrado"
-    for (const [k, v] of Object.entries(p.attributes || {})) {
-      if (/^[A-Z0-9_]+$/.test(k)) attributes.push({ id: k, value_name: String(v) });
-    }
+    let itemId = listing && listing.external_id;
+    const categoryId = prev.category_id || p.categories.mercadolivre || ctx.creds.default_category_id || (itemId ? null : await predictCategory(ctx, p.title));
+    const info = categoryId ? await categoryInfo(ctx, categoryId) : { attrs: [] };
+    const built = MA.buildAttributes(p, info.attrs);
+    attributeIssues(built, !itemId, warnings);
+    const attributes = [{ id: 'SELLER_SKU', value_name: p.sku }, ...built.attributes,
+      p.gtin ? { id: 'GTIN', value_name: String(p.gtin) } : { id: 'EMPTY_GTIN_REASON', value_id: '17055160' }]; // 17055160 = "O produto não tem código cadastrado"
     const stock = p.active ? p.stock : 0;
 
-    let itemId = listing && listing.external_id;
     if (!itemId) {
-      const categoryId = p.categories.mercadolivre || ctx.creds.default_category_id || await predictCategory(ctx, p.title);
       const body = {
         title: p.title.slice(0, 60),
         category_id: categoryId,
@@ -101,6 +99,7 @@ module.exports = {
         shipping: shippingOf(ctx, p),
       };
       if (videoId) body.video_id = videoId;
+      await checkConditional(ctx, categoryId, info, body, built.sent, warnings);
       let item;
       try {
         item = await api(ctx, 'POST', '/items', body);
@@ -150,6 +149,23 @@ async function syncStatus(ctx, itemId, active, prev, warnings) {
     return { paused: false };
   }
   return {};
+}
+
+// "conditional_required": o ML diz, para este item, quais são obrigatórios
+// (POST /categories/{id}/attributes/conditional, só AR/BR/MX).
+async function checkConditional(ctx, categoryId, info, body, sent, warnings) {
+  if (!MA.needsConditional(info.attrs, sent)) return;
+  let res;
+  try {
+    res = await api(ctx, 'POST', `/categories/${categoryId}/attributes/conditional`, body);
+  } catch (e) {
+    warnings.push(`Mercado Livre: não consegui conferir os atributos condicionais (${e.message})`);
+    return;
+  }
+  const missing = (res.required_attributes || []).filter((a) => !sent.has(a.id) && !MA.HANDLED.has(a.id));
+  if (missing.length) {
+    throw new PlatformError(`Mercado Livre: para este produto a categoria exige ${missing.map((a) => `"${a.name}" (${a.id})`).join(', ')} — envie em "attributes"`);
+  }
 }
 
 function shippingOf(ctx, p) {
@@ -219,7 +235,6 @@ const SYNONYMS_ML = [
 ];
 const norm = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
 const hasTag = (def, tag) => !!(def && def.tags && (def.tags[tag] === true || (Array.isArray(def.tags) && def.tags.includes(tag))));
-const ITEM_LEVEL_SKIP = new Set(['SELLER_SKU', 'GTIN', 'EMPTY_GTIN_REASON']);
 
 const sellerTags = new Map();
 async function isUpSeller(ctx) {
@@ -295,15 +310,19 @@ function variantPictures(p, axes, maxPerVar, warnings) {
 
 const variantQty = (p, v) => (p.active && v.active !== false ? Math.max(0, v.stock) : 0);
 
-function itemAttributes(p, axes) {
-  const axisIds = new Set(axes.filter((a) => a.def).map((a) => a.def.id));
-  const out = [];
-  if (p.brand) out.push({ id: 'BRAND', value_name: String(p.brand) });
-  if (p.model) out.push({ id: 'MODEL', value_name: String(p.model) });
-  for (const [k, v] of Object.entries(p.attributes || {})) {
-    if (/^[A-Z0-9_]+$/.test(k) && !axisIds.has(k) && !ITEM_LEVEL_SKIP.has(k)) out.push({ id: k, value_name: String(v) });
-  }
-  return out;
+// Na criação, atributo inválido ou obrigatório faltando barra o envio (o ML
+// recusaria). Num anúncio já publicado vira aviso: o PUT de atributos é
+// parcial e preço/estoque não podem parar por causa de um atributo.
+function attributeIssues(built, creating, warnings) {
+  if (built.errors.length && creating) throw new PlatformError(`Mercado Livre: ${built.errors.join('; ')}`);
+  warnings.push(...built.errors.map((e) => `Mercado Livre: atributo não atualizado — ${e}`), ...built.warnings.map((w) => `Mercado Livre: ${w}`));
+}
+
+// Atributos comuns do anúncio (os eixos da variação vão à parte).
+function itemAttributes(p, axes, info, warnings, creating) {
+  const built = MA.buildAttributes(p, info.attrs, { exclude: axes.filter((a) => a.def).map((a) => a.def.id) });
+  attributeIssues(built, creating, warnings);
+  return built;
 }
 
 async function publishVariants(ctx, p, listing) {
@@ -319,21 +338,24 @@ async function publishVariants(ctx, p, listing) {
   if (!up && max && p.variants.length > max) throw new PlatformError(`Mercado Livre: a categoria aceita no máximo ${max} variações (recebido: ${p.variants.length})`);
   const axes = variationAxes(p, info, up);
   const pictures = variantPictures(p, axes, info.settings.max_pictures_per_item_var || 10, warnings);
-  const base = { categoryId, info, axes, pictures, warnings };
+  const creating = !(listing && listing.external_id) && !Object.keys(prev.items || {}).length;
+  const shared = itemAttributes(p, axes, info, warnings, creating);
+  const base = { categoryId, info, axes, pictures, warnings, shared };
   try {
     return up ? await upFamily(ctx, p, listing, base) : await classicVariations(ctx, p, listing, base);
   } catch (e) {
     // Conta migrada para User Products sem a tag em cache: refaz no modelo novo.
     if (!up && !(listing && listing.external_id) && /family_name|variations is invalid|fields \[title\]|user.product/i.test(e.message)) {
       sellerTags.set(String(ctx.tokens.user_id || ctx.creds.client_id), { at: Date.now(), up: true });
-      return upFamily(ctx, p, listing, { ...base, axes: variationAxes(p, info, true), warnings: [...warnings, 'A conta usa o modelo User Products do ML: cada variação vira um anúncio da mesma família'] });
+      const upAxes = variationAxes(p, info, true);
+      return upFamily(ctx, p, listing, { ...base, axes: upAxes, shared: itemAttributes(p, upAxes, info, [], true), warnings: [...warnings, 'A conta usa o modelo User Products do ML: cada variação vira um anúncio da mesma família'] });
     }
     throw e;
   }
 }
 
 // ---------------------------------------------------------- clássico
-async function classicVariations(ctx, p, listing, { categoryId, info, axes, pictures, warnings }) {
+async function classicVariations(ctx, p, listing, { categoryId, info, axes, pictures, warnings, shared }) {
   const meta = { model: 'classic', category_id: categoryId };
   const prices = [...new Set(p.variants.map((v) => v.price))];
   const unitPrice = Math.max(...prices);
@@ -371,11 +393,12 @@ async function classicVariations(ctx, p, listing, { categoryId, info, axes, pict
       available_quantity: p.variants.reduce((n, v) => n + variantQty(p, v), 0),
       buying_mode: 'buy_it_now', condition: p.condition, listing_type_id: ctx.creds.listing_type_id || 'gold_special',
       pictures: union.map((source) => ({ source })),
-      attributes: itemAttributes(p, axes),
+      attributes: shared.attributes,
       variations: p.variants.map(variationBody),
       shipping: shippingOf(ctx, p),
     };
     if (videoId) body.video_id = videoId;
+    await checkConditional(ctx, categoryId, info, body, new Set([...shared.sent, ...axes.filter((a) => a.def).map((a) => a.def.id)]), warnings);
     const item = await api(ctx, 'POST', '/items', body);
     itemId = item.id;
     meta.permalink = item.permalink;
@@ -399,7 +422,7 @@ async function classicVariations(ctx, p, listing, { categoryId, info, axes, pict
       return out;
     });
     const removed = (cur.variations || []).filter((x) => !Object.values(existing).map(String).includes(String(x.id)));
-    const body = { pictures: union.map((source) => ({ source })), attributes: itemAttributes(p, axes), variations };
+    const body = { pictures: union.map((source) => ({ source })), attributes: shared.attributes, variations };
     if (videoId) body.video_id = videoId;
     const res = await api(ctx, 'PUT', `/items/${itemId}`, body);
     meta.variations = { ...existing, ...mapVariations(res && res.variations, p, axes, comboKey) };
@@ -440,7 +463,7 @@ function mapVariations(list, p, axes, comboKey) {
 }
 
 // ------------------------------------------------------ User Products
-async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, warnings }) {
+async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, warnings, shared: built }) {
   const prev = (listing && listing.meta) || {};
   const meta = { model: 'up', category_id: categoryId, family_name: prev.family_name || p.title.slice(0, info.settings.max_title_length || 60) };
   const items = { ...(prev.items || {}) };
@@ -448,7 +471,8 @@ async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, war
   const promos = { ...(prev.promos || {}) };
   const descHash = sha256(p.description || '');
   const videoId = p.videos.map(youtubeId).find(Boolean);
-  const shared = itemAttributes(p, axes);
+  const shared = built.attributes;
+  let checked = false;
   let firstId = listing && listing.external_id;
   let permalink = prev.permalink;
 
@@ -465,6 +489,10 @@ async function upFamily(ctx, p, listing, { categoryId, info, axes, pictures, war
         shipping: shippingOf(ctx, p),
       };
       if (videoId) body.video_id = videoId;
+      if (!checked) {
+        await checkConditional(ctx, categoryId, info, body, new Set([...built.sent, ...axes.map((a) => a.def.id)]), warnings);
+        checked = true;
+      }
       const item = await api(ctx, 'POST', '/items', body);
       id = item.id;
       if (item.family_id) meta.family_id = item.family_id;
@@ -566,10 +594,25 @@ async function preview(ctx, p) {
           warnings.push('Promoção só em algumas variações não existe no modelo clássico (o desconto vale para o anúncio todo): não será aplicada');
         }
       }
-      const missing = info.attrs.filter((a) => a.tags && a.tags.required && !sent.includes(a.id) && a.id !== 'GTIN');
-      for (const a of missing) {
-        const opts = (a.values || []).slice(0, 5).map((v) => v.name).join(' / ');
-        errors.push(`a categoria exige o atributo "${a.name}" (id ${a.id}${opts ? `: ${opts}` : ''}) — envie em "attributes" com a chave ${a.id}`);
+      // Mesmas regras do envio: nome ou id → formato do value_type; obrigatórios.
+      const axisIds = sent.filter((id) => info.attrs.some((a) => a.id === id && (MA.HANDLED.has(id) ? false : (a.tags || {}).allow_variations)));
+      const built = MA.buildAttributes(p, info.attrs, { exclude: variants.length ? axisIds : [] });
+      errors.push(...built.errors);
+      warnings.push(...built.warnings);
+      sent.splice(0, sent.length, 'SELLER_SKU', ...built.attributes.map((a) => a.id), ...axisIds, variants.length || p.gtin ? 'GTIN' : 'EMPTY_GTIN_REASON');
+      if (!built.errors.length && MA.needsConditional(info.attrs, new Set(sent))) {
+        try {
+          const res = await api(ctx, 'POST', `/categories/${category}/attributes/conditional`, {
+            title: p.title.slice(0, 60), category_id: category, price: p.price, currency_id: p.currency || 'BRL', available_quantity: Math.max(1, p.stock),
+            buying_mode: 'buy_it_now', condition: p.condition, listing_type_id: ctx.creds.listing_type_id || 'gold_special',
+            pictures: p.images.slice(0, 1).map((source) => ({ source })), attributes: built.attributes,
+          });
+          const missing = (res.required_attributes || []).filter((a) => !sent.includes(a.id) && !MA.HANDLED.has(a.id));
+          if (missing.length) errors.push(`para este produto a categoria exige ${missing.map((a) => `"${a.name}" (${a.id})`).join(', ')} — envie em "attributes"`);
+        } catch (e) {
+          if (e instanceof PlatformError && !e.retryable) warnings.push(`atributos condicionais não conferidos (${e.message})`);
+          else throw e;
+        }
       }
     } catch (e) {
       if (!(e instanceof PlatformError) || e.retryable) throw e;
