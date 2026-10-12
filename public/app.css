@@ -226,3 +226,20 @@ td.down, .sub.down { color: var(--ok); }
 .ugc-media a { display: block; width: 100%; height: 100%; }
 .ugc-ph { color: var(--muted); font-size: 13px; padding: 16px; text-align: center; }
 textarea.ugc-prompt { min-height: 150px; font-size: 13px; line-height: 1.45; }
+
+/* Agentes de IA */
+.ai-form { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 14px; }
+.agent-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.agent-head h3 { margin: 0; }
+.slot-row { display: flex; gap: 8px; }
+.slot-row select { flex: 0 0 42%; min-width: 0; }
+.slot-row input { flex: 1; min-width: 0; }
+section.agent .grid2 { margin-top: 6px; }
+/* Auditor de anúncios (Prévia) */
+.pv-audit:empty { display: none; }
+.pv-audit { padding: 10px 18px 0; }
+details.audit { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--bg); }
+details.audit summary { cursor: pointer; }
+details.audit[open] summary { margin-bottom: 8px; }
+@media (max-width: 720px) { .slot-row { flex-direction: column; } .slot-row select { flex-basis: auto; } }
+.pv-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

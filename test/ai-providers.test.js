@@ -4,10 +4,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const openai = require('../src/ugc/providers/openai');
-const google = require('../src/ugc/providers/google');
-const xai = require('../src/ugc/providers/xai');
-const { sniffImage } = require('../src/ugc/providers/http');
+const openai = require('../src/ai/providers/openai');
+const google = require('../src/ai/providers/google');
+const xai = require('../src/ai/providers/xai');
+const deepseek = require('../src/ai/providers/deepseek');
+const { sniffImage } = require('../src/ai/providers/http');
 
 const realFetch = global.fetch;
 let calls = [];
@@ -212,6 +213,34 @@ test('xAI: roteiro pelo chat (JSON no texto)', async () => {
   const out = await xai.writeJson(cfgOf(xai), { system: 's', user: 'u' });
   assert.equal(out.posse, 'b');
   assert.deepEqual([calls[0].url, calls[0].body.model], ['https://api.x.ai/v1/chat/completions', 'grok-4.3']);
+});
+
+// =================================================================== DeepSeek
+test('DeepSeek: JSON sem raciocínio, nova tentativa quando volta vazio, saldo e erros', async () => {
+  reply(200, { choices: [{ finish_reason: 'stop', message: { content: '' } }] });
+  reply(200, { choices: [{ finish_reason: 'stop', message: { content: '{"ofertas":[{"i":0,"mesmo":true}]}' } }] });
+  const out = await deepseek.writeJson(cfgOf(deepseek), { system: 'Confira as ofertas', user: '{"x":1}' });
+  assert.deepEqual(out, { ofertas: [{ i: 0, mesmo: true }] });
+  assert.equal(calls.length, 2, 'repete uma vez quando o modo JSON volta vazio');
+  const c = calls[0];
+  assert.equal(c.url, 'https://api.deepseek.com/chat/completions');
+  assert.equal(c.headers.Authorization, 'Bearer chave-xyz');
+  assert.deepEqual([c.body.model, c.body.thinking, c.body.response_format], ['deepseek-flash', { type: 'disabled' }, { type: 'json_object' }]);
+  assert.match(c.body.messages[0].content, /json/, 'o modo JSON exige a palavra "json" no prompt');
+  assert.equal(deepseek.image, undefined, 'DeepSeek não gera imagem');
+  assert.equal(deepseek.startVideo, undefined, 'nem vídeo');
+
+  reply(200, { choices: [{ finish_reason: 'length', message: { content: '{"ofertas":[' } }] });
+  await assert.rejects(deepseek.writeJson(cfgOf(deepseek), { system: 's', user: 'u' }), /cortada/);
+
+  reply(200, { is_available: false, balance_infos: [{ currency: 'USD', total_balance: '0.00', granted_balance: '0.00', topped_up_balance: '0.00' }] });
+  const t = await deepseek.test(cfgOf(deepseek));
+  assert.equal(calls.at(-1).url, 'https://api.deepseek.com/user/balance');
+  assert.deepEqual([t.account, /sem saldo/.test(t.warning)], ['saldo 0.00 USD', true]);
+  reply(401, 'Authentication Fails (governor)');
+  await assert.rejects(deepseek.test(cfgOf(deepseek)), /chave de API inválida/);
+  reply(402, { error: { message: 'Insufficient Balance', type: 'unknown_error', code: 'invalid_request_error' } });
+  await assert.rejects(deepseek.writeJson(cfgOf(deepseek), { system: 's', user: 'u' }), /sem créditos/);
 });
 
 test('tipo real da foto pelos primeiros bytes', () => {

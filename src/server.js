@@ -15,6 +15,7 @@ function createServer() {
   api.register(router);
   require('./routes/pricing').register(router, { requireAdmin: api.requireAdmin });
   require('./routes/ugc').register(router, { requireAdmin: api.requireAdmin });
+  require('./routes/ai').register(router, { requireAdmin: api.requireAdmin });
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');

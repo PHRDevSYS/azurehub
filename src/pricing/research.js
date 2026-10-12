@@ -1,13 +1,15 @@
 'use strict';
 // Pesquisa de preços de produtos similares, em segundo plano.
 // Para cada produto: consulta as fontes ativas (GTIN primeiro, depois título),
-// pontua a similaridade, descarta usados e preços fora da curva, e grava as
-// estatísticas usadas pela Precificação.
+// pontua a similaridade (e, com o agente de IA configurado, confere se cada
+// oferta é mesmo o mesmo produto), descarta usados e preços fora da curva, e
+// grava as estatísticas usadas pela Precificação.
 const store = require('../lib/store');
 const platforms = require('../platforms');
 const { buildQuery, similarity, markOutliers, stats } = require('./match');
 const html = require('./sources/html');
 const storefronts = require('./sources/storefronts');
+const pricingAgent = require('../ai/pricing-agent');
 
 const SOURCES = {
   mercadolivre: require('./sources/mercadolivre'),
@@ -72,7 +74,8 @@ async function researchOne(sku, cfg, ctx) {
     }
   }
   dedupe(offers);
-  const accepted = offers.filter((o) => o.price > 0 && o.condition !== 'used' && o.score >= cfg.minSimilarity);
+  const agent = await pricingAgent.reviewOffers(p, offers, cfg.minSimilarity);
+  const accepted = offers.filter((o) => o.price > 0 && o.condition !== 'used' && pricingAgent.isSame(o, cfg.minSimilarity));
   const marked = markOutliers(accepted);
   const valid = marked.filter((o) => !o.outlier);
   const result = {
@@ -80,14 +83,22 @@ async function researchOne(sku, cfg, ctx) {
     offers: [
       ...marked.map((o) => ({ ...o, accepted: !o.outlier, reason: o.outlier ? 'preço fora da curva' : null })),
       ...offers.filter((o) => !accepted.includes(o)).map((o) => ({
-        ...o, accepted: false, reason: o.condition === 'used' ? 'usado' : o.score < cfg.minSimilarity ? `similaridade ${Math.round(o.score * 100)}% abaixo do mínimo` : 'sem preço',
+        ...o, accepted: false, reason: rejectReason(o, cfg.minSimilarity),
       })),
     ].sort((a, b) => (b.accepted - a.accepted) || (a.price - b.price)).slice(0, 80),
     stats: stats(valid.map((o) => o.price)),
     sources,
+    agent,
   };
   store.saveResearch(sku, result);
   return result;
+}
+
+function rejectReason(o, min) {
+  if (o.condition === 'used') return 'usado';
+  if (!(o.price > 0)) return 'sem preço';
+  if (o.ai && !o.ai.same) return `agente de IA: outro produto${o.ai.reason ? ` (${o.ai.reason})` : ''}`;
+  return `similaridade ${Math.round(o.score * 100)}% abaixo do mínimo`;
 }
 
 // O mesmo anúncio não conta duas vezes na mediana (ex.: URL monitorada que

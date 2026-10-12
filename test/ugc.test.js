@@ -13,7 +13,7 @@ process.env.HUB_SECRET = 'teste';
 
 const { createServer } = require('../src/server');
 const store = require('../src/lib/store');
-const providers = require('../src/ugc/providers');
+const providers = require('../src/ai/providers');
 const runner = require('../src/ugc/runner');
 const agent = require('../src/ugc/agent');
 const { normalizeProduct } = require('../src/source/normalize');
@@ -135,17 +135,23 @@ test('prompts-padrão: 4 mídias, persona fictícia, produto idêntico às fotos
 test('rotas exigem login', async () => {
   const saved = cookie;
   cookie = '';
-  for (const [m, u] of [['GET', '/api/ugc/settings'], ['POST', '/api/ugc/GAR/plan'], ['GET', '/api/ugc/media/1']]) {
-    assert.equal((await call(m, u, m === 'POST' ? {} : undefined)).status, 401, `${m} ${u}`);
+  for (const [m, u] of [['GET', '/api/ugc/settings'], ['POST', '/api/ugc/GAR/plan'], ['GET', '/api/ugc/media/1'], ['GET', '/api/ai'], ['PUT', '/api/ai/providers/fake'], ['PUT', '/api/ai/agents/midia']]) {
+    assert.equal((await call(m, u, m === 'GET' ? undefined : {})).status, 401, `${m} ${u}`);
   }
   cookie = saved;
 });
 
-test('sem modelo conectado: o roteiro sai dos prompts-padrão e gerar pede a conexão', async () => {
+const setAgent = (id, body) => call('PUT', `/api/ai/agents/${id}`, body);
+const midia = (r) => r.body.agents.find((a) => a.id === 'midia');
+const slot = (r, key) => midia(r).slots.find((s) => s.key === key);
+
+test('sem modelo escolhido: o roteiro sai dos prompts-padrão e gerar pede o modelo', async () => {
   const s = (await call('GET', '/api/ugc/settings')).body;
-  assert.deepEqual(s.use, { image: null, video: null });
-  assert.ok(s.providers.some((p) => p.id === 'fake' && !p.connected));
+  assert.deepEqual(s.slots, { text: null, image: null, video: null });
   assert.deepEqual(s.kinds.map((k) => k.kind), agent.KINDS);
+  const all = (await call('GET', '/api/ai')).body;
+  assert.ok(all.providers.some((p) => p.id === 'fake' && !p.connected));
+  assert.deepEqual(all.agents.map((a) => a.id), ['midia', 'precificacao', 'auditor', 'crm']);
 
   const plan = await call('POST', '/api/ugc/GAR/plan', { gender: 'feminino' });
   assert.equal(plan.status, 200);
@@ -155,50 +161,62 @@ test('sem modelo conectado: o roteiro sai dos prompts-padrão e gerar pede a con
 
   const gen = await call('POST', '/api/ugc/GAR/generate', { gender: 'feminino', items: [{ kind: 'uso', prompt: plan.body.items[0].prompt }] });
   assert.equal(gen.status, 400);
-  assert.match(gen.body.error, /Conecte um modelo de IA de imagem/);
+  assert.match(gen.body.error, /Escolha o modelo de imagem para "Fotos \(mídias 1 a 3\)" em Agentes de IA/);
 });
 
-test('configura o modelo: chave cifrada e mascarada, modelos e teste de conexão', async () => {
-  let r = await call('PUT', '/api/ugc/settings', { provider: 'fake', apiKey: 'sk-segredo-123', models: { image: 'img-2', video: '', text: 'txt-1' }, videoSeconds: 12 });
+test('Agentes de IA: chave cifrada e mascarada, teste de conexão e modelo por função', async () => {
+  let r = await setAgent('midia', { slots: { image: { provider: 'fake' } } });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /Conecte IA Simulada/, 'sem chave não dá para escolher o provedor');
+
+  r = await call('PUT', '/api/ai/providers/fake', { apiKey: 'sk-segredo-123' });
   assert.equal(r.status, 200);
   const p = r.body.providers.find((x) => x.id === 'fake');
-  assert.deepEqual(r.body.use, { image: 'fake', video: 'fake' }, 'o primeiro provedor conectado assume fotos e vídeo');
-  assert.deepEqual([p.connected, p.key, p.models.image, p.models.video, r.body.videoSeconds], [true, '••••-123', 'img-2', 'vid-1', 12]);
-  const raw = JSON.stringify(store.open().prepare("SELECT value FROM settings WHERE key LIKE 'ugc%'").all());
+  assert.deepEqual([p.connected, p.key], [true, '••••-123']);
+  const raw = JSON.stringify(store.open().prepare("SELECT value FROM settings WHERE key LIKE 'ai%'").all());
   assert.ok(!raw.includes('sk-segredo-123'), 'a chave não fica em texto puro no banco');
   // Reenviar a máscara não troca a chave.
-  await call('PUT', '/api/ugc/settings', { provider: 'fake', apiKey: '••••-123', models: { image: 'img-2', text: 'txt-1' }, videoSeconds: 12 });
-  r = await call('POST', '/api/ugc/test', { provider: 'fake' });
+  await call('PUT', '/api/ai/providers/fake', { apiKey: '••••-123' });
+  r = await call('POST', '/api/ai/providers/fake/test');
   assert.equal(r.body.account, 'chave 123');
-  assert.equal((await call('PUT', '/api/ugc/settings', { provider: 'nada' })).status, 400);
+  assert.equal((await call('PUT', '/api/ai/providers/nada', { apiKey: 'x' })).status, 400);
+
+  r = await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-2' }, video: { provider: 'fake', model: '' }, text: { provider: 'fake', model: 'txt-1' } }, options: { videoSeconds: 12 } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([slot(r, 'image').model, slot(r, 'video').model, slot(r, 'text').model, midia(r).values.videoSeconds], ['img-2', 'vid-1', 'txt-1', 12],
+    'modelo vazio usa o padrão do provedor');
+  assert.equal((await setAgent('midia', { options: { videoSeconds: 'x' } })).status, 400);
+  assert.equal((await setAgent('nada', {})).status, 400);
+  const d = (await call('GET', '/api/ugc/settings')).body;
+  assert.deepEqual(d.slots.image, { provider: 'fake', name: 'IA Simulada', model: 'img-2' });
+  assert.equal(d.videoSeconds, 12);
 });
 
 test('fotos e vídeo podem vir de provedores diferentes; gerar valida tudo antes de enfileirar', async () => {
-  let r = await call('PUT', '/api/ugc/settings', { use: { video: 'soimagem' } });
+  await call('PUT', '/api/ai/providers/soimagem', { apiKey: 'k-soimagem' });
+  let r = await setAgent('midia', { slots: { video: { provider: 'soimagem' } } });
   assert.equal(r.status, 400);
-  assert.match(r.body.error, /Só Imagem não gera vídeos/);
-  r = await call('PUT', '/api/ugc/settings', { provider: 'soimagem', apiKey: 'k-soimagem' });
-  assert.deepEqual(r.body.use, { image: 'fake', video: 'fake' }, 'conectar outro provedor não troca a escolha feita');
-  r = await call('PUT', '/api/ugc/settings', { use: { image: 'soimagem' } });
-  assert.deepEqual(r.body.use, { image: 'soimagem', video: 'fake' });
-  assert.equal(r.body.providers.find((x) => x.id === 'soimagem').models.video, '', 'sem vídeo, sem modelo de vídeo');
-  // Sem modelo de texto no provedor das fotos, o roteiro sai do provedor do vídeo.
+  assert.match(r.body.error, /Só Imagem não tem modelo de vídeo/);
+  r = await setAgent('midia', { slots: { text: { provider: 'soimagem' } } });
+  assert.match(r.body.error, /não tem modelo de texto/);
+  r = await setAgent('midia', { slots: { image: { provider: 'soimagem' } } });
+  assert.deepEqual([slot(r, 'image').provider, slot(r, 'image').model, slot(r, 'video').provider], ['soimagem', 'si-1', 'fake']);
   const plan = await call('POST', '/api/ugc/GAR/plan', { gender: 'feminino' });
-  assert.equal(plan.body.by, 'agente');
+  assert.equal(plan.body.by, 'agente', 'o roteiro tem função própria');
 
-  r = await call('PUT', '/api/ugc/settings', { use: { image: 'fake', video: null } });
+  await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-2' }, video: { provider: '' } } });
   const before = store.ugcHistory('GAR', 1000).length;
   const gen = await call('POST', '/api/ugc/GAR/generate', { gender: 'feminino', items: plan.body.items.map((x) => ({ kind: x.kind, prompt: x.prompt })) });
   assert.equal(gen.status, 400);
-  assert.match(gen.body.error, /Conecte um modelo de IA de vídeo/);
+  assert.match(gen.body.error, /Escolha o modelo de vídeo/);
   assert.equal(store.ugcHistory('GAR', 1000).length, before, 'nada entra na fila pela metade');
 
-  // Remover a chave tira o provedor do papel que ele ocupava.
-  await call('PUT', '/api/ugc/settings', { use: { image: 'soimagem', video: 'fake' } });
-  r = await call('PUT', '/api/ugc/settings', { provider: 'soimagem', removeKey: true });
-  assert.deepEqual(r.body.use, { image: null, video: 'fake' });
-  r = await call('PUT', '/api/ugc/settings', { use: { image: 'fake' } });
-  assert.deepEqual(r.body.use, { image: 'fake', video: 'fake' });
+  // Remover a chave tira o provedor das funções que ele ocupava.
+  await setAgent('midia', { slots: { image: { provider: 'soimagem' }, video: { provider: 'fake' } } });
+  r = await call('PUT', '/api/ai/providers/soimagem', { removeKey: true });
+  assert.deepEqual([slot(r, 'image').provider, slot(r, 'video').provider], [null, 'fake']);
+  r = await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-2' } } });
+  assert.equal(slot(r, 'image').model, 'img-2');
 });
 
 test('o agente escreve os prompts com o modelo de texto (e cai para o padrão no que vier fraco)', async () => {

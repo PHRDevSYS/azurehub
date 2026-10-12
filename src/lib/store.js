@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS ugc_media (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ugc_media_sku ON ugc_media(sku, kind, id);
+CREATE TABLE IF NOT EXISTS ai_audits (
+  sku TEXT PRIMARY KEY,
+  data TEXT NOT NULL,        -- JSON: achados do Auditor de anúncios (IA)
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS oauth_states (
   state TEXT PRIMARY KEY,
   platform TEXT NOT NULL,
@@ -312,6 +317,14 @@ function saveResearch(sku, data) {
   run(`INSERT INTO price_research(sku, data, collected_at) VALUES(?, ?, ?)
        ON CONFLICT(sku) DO UPDATE SET data = excluded.data, collected_at = excluded.collected_at`, sku, JSON.stringify(data), now());
 }
+function getAudit(sku) {
+  const row = get('SELECT * FROM ai_audits WHERE sku = ?', sku);
+  return row ? { ...JSON.parse(row.data), createdAt: row.created_at } : null;
+}
+function saveAudit(sku, data) {
+  run(`INSERT INTO ai_audits(sku, data, created_at) VALUES(?, ?, ?)
+       ON CONFLICT(sku) DO UPDATE SET data = excluded.data, created_at = excluded.created_at`, sku, JSON.stringify(data), now());
+}
 // Ligar/desligar o módulo muda o preço efetivo de todos os produtos com preço definido.
 function refreshAllSyncHashes() {
   for (const r of all('SELECT sku FROM pricing')) refreshSyncHash(r.sku);
@@ -488,7 +501,7 @@ module.exports = {
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
   upsertProduct, getProduct, listProducts, listSync, deleteProduct, refreshSyncHash, syncHashOf,
   getPricing, pricingFor, setPricing, getResearch, researchFor, saveResearch, refreshAllSyncHashes,
-  ugcInsert, ugcUpdate, ugcGet, ugcLatest, ugcLastDone, ugcLatestOf, ugcHistory, ugcActive,
+  ugcInsert, ugcUpdate, ugcGet, ugcLatest, ugcLastDone, ugcLatestOf, ugcHistory, ugcActive, getAudit, saveAudit,
   getListing, saveListing, listingStats, selectForPlatform, unselect, selectedSkus, syncCounts,
   enqueue, finishJob, resetStuckJobs, listJobs, jobStats, clearFinishedJobs,
   log, listLogs, jobsFor,

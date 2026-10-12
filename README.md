@@ -171,6 +171,78 @@ O Node verifica o `robots.txt` e o intervalo, chama `scraper/scrapling_worker.py
 (JSON na entrada e na saída) e trata o resultado. A imagem Docker não traz
 Python: para usar esta fonte em Docker, estenda a imagem.
 
+## Agentes de IA
+
+Tela **Agentes de IA**: você conecta os provedores de IA com a **sua chave de
+API** (cifrada no servidor; cada provedor cobra direto na sua conta) e escolhe,
+para cada agente, **qual provedor e qual modelo** executa cada função.
+
+| Agente | Onde age | Funções (modelo) |
+|---|---|---|
+| **Geração de mídia UGC** | Prévia › *Gerar mídia UGC* | roteiro (texto, opcional), fotos (imagem), vídeo falado (vídeo) |
+| **Precificação** | pesquisa de mercado | confere se cada oferta é mesmo o mesmo produto (texto, opcional) |
+| **Auditor de anúncios** | Prévia › *Auditar com IA* | revisa o anúncio de cada marketplace (texto) |
+| **CRM (atendimento)** | *em breve* | a escolha do modelo já fica salva |
+
+Provedores:
+
+| Provedor | Texto | Imagem | Vídeo | Observações |
+|---|---|---|---|---|
+| **OpenAI** | GPT (`gpt-6-luna`…) | GPT Image 2.5 (`gpt-image-2.5-sunburst`) | — | A OpenAI desligou a API de vídeo (Sora) em 24/09/2026 |
+| **Google Gemini** | `gemini-3.6-flash` | Nano Banana 2.1 (`gemini-nano-banana-2.1`) | Gemini Omni (`gemini-omni-1.1-flash`, 3–10 s, áudio nativo) | Interactions API; exige projeto com faturamento |
+| **xAI (Grok)** | `grok-4.3` | Grok Imagine Image 2.0 | Grok Imagine Video 1.5 (até 15 s, sincronia labial, referências de pessoa e produto) | sem 4:5 nas fotos (usa 3:4) |
+| **DeepSeek** | `deepseek-flash`, `deepseek-v4-pro` | — | — | texto muito barato; a API da DeepSeek não gera imagem nem vídeo |
+| **OpenRouter** | centenas de modelos (recomendados: Llama 3 e Qwen 8B) | modelos de imagem do catálogo | modelos de vídeo do catálogo | **uma chave só** para todos; roteia para o fornecedor mais barato |
+
+Em cada função dá para digitar o id de **qualquer** modelo do provedor (as
+listas são sugestões). Modelo vazio usa o padrão do provedor.
+
+### Geração de mídia UGC (Prévia)
+
+Para cada produto, o agente cria 4 mídias com um(a) **influencer fictício(a)**
+(persona gerada por IA, nunca uma pessoa real) do gênero escolhido:
+
+1. foto do influencer **usando** o produto;
+2. foto do influencer **segurando** o produto;
+3. arte do produto com **especificações e vantagens** (texto em português);
+4. **vídeo** vertical 9:16 do influencer falando do produto, com **CTA logo no
+   início**, qualidades e vantagens no uso diário.
+
+- **Roteiro:** o modelo de texto escreve os 4 prompts a partir só dos dados
+  reais do produto; sem modelo de texto, valem os prompts-padrão do AzureHub.
+  Cada prompt fica numa caixa de texto **editável** e cada mídia pode ser
+  **gerada de novo** sozinha com o prompt alterado.
+- **Fidelidade:** até 3 fotos reais do produto vão como referência em toda
+  geração; a foto 1 pronta vira a referência da **persona** nas mídias 2 e 4
+  (a mesma pessoa em todas).
+- **Fila:** em segundo plano (2 fotos e 2 vídeos ao mesmo tempo). O vídeo é
+  assíncrono: o id do job fica gravado e, se o servidor reiniciar, a consulta
+  continua de onde parou — sem gerar (e pagar) de novo.
+- **Vários produtos:** *Gerar para os N produtos* usa os prompts já editados de
+  cada produto ou pede o roteiro ao agente.
+- Arquivos em `data/ugc/<sku>/`, servidos só com login; botão **Baixar** em cada
+  mídia. Enquanto uma nova versão é gerada (ou se ela falhar), a anterior
+  continua visível.
+- **Rotule como conteúdo gerado por IA** quando o marketplace exigir; as
+  imagens do Google levam SynthID e as da OpenAI, credenciais C2PA.
+
+### Precificação com IA
+
+Com um modelo escolhido no agente **Precificação**, a pesquisa de mercado manda
+ao modelo as ofertas em dúvida (similaridade entre o mínimo − 25 pontos e 99%):
+ele **descarta** as parecidas (outro tamanho, kit, refil, acessório, usado) e
+**recupera** as iguais com título bem diferente. Oferta pelo mesmo código de
+barras ou por URL monitorada não passa pela IA. Se o modelo falhar, vale a
+similaridade do título e a tela mostra o motivo.
+
+### Auditor de anúncios
+
+Na Prévia, **Auditar com IA** manda ao modelo os dados do produto e exatamente
+o que vai subir em cada marketplace (campos, erros e avisos da prévia). Volta
+uma **nota**, **achados** por gravidade (problema + sugestão) e um **título
+sugerido** por marketplace dentro do limite de caracteres. Só lê: nada é
+alterado sozinho. A última auditoria de cada produto fica salva.
+
 ## Origens de produtos
 
 | Origem | Como conecta | O que é capturado |

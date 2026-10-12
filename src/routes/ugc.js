@@ -4,10 +4,12 @@ const fs = require('node:fs');
 const store = require('../lib/store');
 const { HttpError, readJson } = require('../lib/http');
 const agent = require('../ugc/agent');
-const settings = require('../ugc/settings');
+const ai = require('../ai/settings');
 const runner = require('../ugc/runner');
 
 const GENDERS = ['feminino', 'masculino'];
+const agentKinds = () => agent.KINDS.map((k) => ({ kind: k, label: agent.LABELS[k] }));
+const writer = () => ai.resolve('midia', 'text', { optional: true }) || { provider: { name: 'AzureHub' }, cfg: { models: {} } };
 
 function wrap(fn) {
   return async (ctx) => {
@@ -45,21 +47,14 @@ function productOr404(sku) {
 }
 
 function register(r, { requireAdmin }) {
-  r.get('/api/ugc/settings', requireAdmin, async () => ({ ...settings.summary(), kinds: agent.KINDS.map((k) => ({ kind: k, label: agent.LABELS[k] })) }));
-
-  r.put('/api/ugc/settings', requireAdmin, wrap(async (ctx) => {
-    const input = await readJson(ctx.req);
-    const res = settings.save(input);
-    store.log('info', `Mídia UGC: modelos de IA atualizados (fotos: ${res.use.image || '—'}, vídeo: ${res.use.video || '—'})`);
-    return res;
-  }));
-
-  // Testa a chave de um provedor (sem gerar nada pago).
-  r.post('/api/ugc/test', requireAdmin, wrap(async (ctx) => {
-    const { provider: id } = await readJson(ctx.req);
-    const { provider, cfg } = settings.active({ id: id || settings.get().image || settings.get().video });
-    return { ok: true, provider: provider.id, ...(await provider.test(cfg)) };
-  }));
+  // Quem gera cada mídia (configurado em Agentes de IA), para a gaveta.
+  r.get('/api/ugc/settings', requireAdmin, async () => {
+    const all = ai.summary();
+    const midia = all.agents.find((a) => a.id === 'midia');
+    const names = Object.fromEntries(all.providers.filter((p) => p.connected).map((p) => [p.id, p.name]));
+    const slots = Object.fromEntries(midia.slots.map((s) => [s.key, names[s.provider] ? { provider: s.provider, name: names[s.provider], model: s.model } : null]));
+    return { slots, videoSeconds: midia.values.videoSeconds, kinds: agentKinds() };
+  });
 
   // Estado das 4 mídias do produto (a versão mais recente de cada).
   r.get('/api/ugc/:sku', requireAdmin, async (ctx) => {
@@ -72,10 +67,9 @@ function register(r, { requireAdmin }) {
     const prod = productOr404(ctx.params.sku);
     const { gender } = await readJson(ctx.req);
     if (!GENDERS.includes(gender)) throw new Error('Escolha o gênero do(a) influencer: feminino ou masculino');
-    const videoSeconds = settings.get().videoSeconds;
-    // Sem modelo de texto conectado, o agente usa os prompts-padrão.
-    const { provider, cfg } = settings.writer() || { provider: { name: 'AzureHub' }, cfg: { models: {} } };
-    const plan = await agent.planPrompts(provider, cfg, prod.data, gender, { videoSeconds });
+    // Sem modelo de texto escolhido, o agente usa os prompts-padrão.
+    const { provider, cfg } = writer();
+    const plan = await agent.planPrompts(provider, cfg, prod.data, gender, { videoSeconds: ai.options('midia').videoSeconds });
     for (const k of agent.KINDS) store.ugcInsert({ sku: prod.sku, kind: k, gender, prompt: plan.prompts[k], status: 'draft' });
     return { by: plan.by, note: plan.note, items: itemsOf(prod.sku) };
   }));
@@ -105,16 +99,16 @@ function register(r, { requireAdmin }) {
     const list = [...new Set(Array.isArray(skus) ? skus.map(String) : [])].filter((sku) => store.getProduct(sku));
     if (!list.length) throw new Error('Nenhum produto selecionado');
     if (list.length > 50) throw new Error('No máximo 50 produtos por vez');
-    settings.active({ kind: 'image' });
-    settings.active({ kind: 'video' });
+    ai.resolve('midia', 'image');
+    ai.resolve('midia', 'video');
     (async () => {
       for (const sku of list) {
         try {
           const latest = Object.fromEntries(store.ugcLatest(sku).filter((x) => x.gender === gender && validPrompt(x.prompt)).map((x) => [x.kind, x.prompt.trim()]));
           let prompts = latest;
           if (agent.KINDS.some((k) => !latest[k])) {
-            const { provider, cfg } = settings.writer() || { provider: { name: 'AzureHub' }, cfg: { models: {} } };
-            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: settings.get().videoSeconds })).prompts, ...latest };
+            const { provider, cfg } = writer();
+            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: ai.options('midia').videoSeconds })).prompts, ...latest };
           }
           runner.generate({ sku, gender, items: agent.KINDS.map((kind) => ({ kind, prompt: prompts[kind] })) });
         } catch (e) {

@@ -13,9 +13,10 @@ const path = require('node:path');
 const config = require('../config');
 const store = require('../lib/store');
 const { download } = require('../lib/media');
-const settings = require('./settings');
+const ai = require('../ai/settings');
+const providers = require('../ai/providers');
 const agent = require('./agent');
-const { sniffImage } = require('./providers/http');
+const { sniffImage } = require('../ai/providers/http');
 
 const DIR = path.join(config.dataDir, 'ugc');
 const REF_MAX = 3;
@@ -94,10 +95,10 @@ async function work(id) {
   const prod = store.getProduct(item.sku);
   if (!prod) throw new Error('produto não encontrado');
   const slot = item.kind === 'video' ? 'video' : 'image';
-  const active = settings.active({ id: item.provider, kind: slot });
-  const { provider } = active;
-  // O modelo gravado no pedido vale, mesmo que a configuração mude depois.
-  const cfg = { ...active.cfg, models: { ...active.cfg.models, [slot]: item.model || active.cfg.models[slot] } };
+  // O provedor e o modelo gravados no pedido valem, mesmo que a escolha na
+  // tela Agentes de IA mude depois.
+  const { provider, cfg } = ai.connection(item.provider, { [slot]: item.model });
+  if (!providers.can(provider, slot)) throw new Error(`${provider.name} não gera ${slot === 'video' ? 'vídeos' : 'imagens'}`);
   const inputs = async () => {
     const products = await references(prod.data);
     const face = ['posse', 'video'].includes(item.kind) ? await persona(item) : null;
@@ -116,7 +117,7 @@ async function work(id) {
   if (!job) {
     store.ugcUpdate(id, { status: 'running' });
     const { refs, prompt, persona: hasPersona } = await inputs();
-    const out = await provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: cfg.videoSeconds, aspect: '9:16' });
+    const out = await provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.options('midia').videoSeconds, aspect: '9:16' });
     if (out.buffer) { save(item, out.buffer, out.mime || 'video/mp4'); return; } // provedor que responde na hora
     job = out.job;
     store.ugcUpdate(id, { job: String(job) });
@@ -137,10 +138,7 @@ async function work(id) {
 const ORDER = ['uso', 'especificacoes', 'posse', 'video'];
 function generate({ sku, gender, items }) {
   const plan = [...items].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind)).map((it) => {
-    const slot = it.kind === 'video' ? 'video' : 'image';
-    const { provider, cfg } = settings.active({ kind: slot });
-    const model = cfg.models[slot];
-    if (!model) throw new Error(`Escolha o modelo de ${slot === 'video' ? 'vídeo' : 'imagem'} de ${provider.name} em "Modelo de IA"`);
+    const { provider, model } = ai.resolve('midia', it.kind === 'video' ? 'video' : 'image');
     return { ...it, provider: provider.id, model };
   });
   return plan.map((it) => {

@@ -261,7 +261,7 @@ function showLogin() {
 }
 
 // =============================================================== rotas
-const VIEWS = { integracao: viewIntegracao, produtos: viewProdutos, precificacao: viewPrecificacao, previa: viewPrevia, sincronizacao: viewSincronizacao };
+const VIEWS = { integracao: viewIntegracao, produtos: viewProdutos, precificacao: viewPrecificacao, previa: viewPrevia, sincronizacao: viewSincronizacao, agentes: viewAgentes };
 let refreshTimer = null;
 
 function startApp(view) {
@@ -878,14 +878,17 @@ async function openPricingDetail(sku) {
       <p class="muted">Busca: “${esc(res.query && res.query.text)}”${res.query && res.query.gtin ? ` · GTIN ${esc(res.query.gtin)}` : ''}</p>
       <div class="table-wrap"><table><tr><th>Fonte</th><th>Situação</th></tr>
         ${res.sources.map((s) => `<tr><td>${esc(s.name)}</td><td class="${s.ok ? '' : 'lvl-error'}">${s.ok ? `${s.count} resultado(s)` : esc(s.error)}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">Nenhuma fonte consultada.</td></tr>'}
+        ${res.agent ? `<tr><td>Agente de IA <span class="sub">${esc(res.agent.model)}</span></td><td class="${res.agent.error ? 'lvl-error' : ''}">${res.agent.error
+    ? `não conferiu (${esc(res.agent.error)}); valeu a similaridade`
+    : `conferiu ${res.agent.checked} oferta(s): descartou ${res.agent.rejected} parecida(s) e recuperou ${res.agent.rescued} igual(is) com título diferente`}</td></tr>` : ''}
       </table></div>
       <h4>Ofertas encontradas (${res.offers.length})</h4>
       <div class="table-wrap"><table><tr><th>Anúncio</th><th>Fonte</th><th class="num">Preço</th><th class="num">Similaridade</th><th>Por</th><th>Situação</th></tr>
         ${res.offers.map((o) => `<tr class="${o.accepted ? '' : 'muted'}">
           <td class="prod">${o.url ? `<a href="${esc(safeUrl(o.url))}" target="_blank" rel="noopener nofollow">${esc(o.title || o.url)}</a>` : esc(o.title)}${o.brand ? `<span class="sub">${esc(o.brand)}</span>` : ''}</td>
           <td class="nowrap">${esc(o.source)}</td><td class="num">${money(o.price)}</td><td class="num">${Math.round((o.score || 0) * 100)}%</td>
-          <td class="nowrap">${esc(o.matchedBy || '')}</td>
-          <td>${o.accepted ? '<span class="badge ok">considerada</span>' : `<span class="badge">${esc(o.reason || 'descartada')}</span>`}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nenhuma oferta.</td></tr>'}
+          <td class="nowrap">${esc(o.matchedBy || '')}${o.ai ? ` · <span title="${esc(o.ai.reason || '')}">IA ${o.ai.same ? '✓' : '✗'}</span>` : ''}</td>
+          <td>${o.accepted ? `<span class="badge ok"${o.ai && o.ai.reason ? ` title="${esc(o.ai.reason)}"` : ''}>${o.ai ? 'confirmada pela IA' : 'considerada'}</span>` : `<span class="badge">${esc(o.reason || 'descartada')}</span>`}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nenhuma oferta.</td></tr>'}
       </table></div>` : '<p class="muted">Ainda não pesquisado. Use <b>Pesquisar</b> abaixo ou na grade.</p>'}
     <div class="actions" style="justify-content:flex-start"><button id="pd-research">Pesquisar este produto agora</button></div>
 
@@ -1024,7 +1027,7 @@ async function viewPrevia() {
     return;
   }
   if (!state.preview || state.preview.key !== key) {
-    state.preview = { key, items: [], include: {}, tab: {} };
+    state.preview = { key, items: [], include: {}, tab: {}, audits: {} };
     for (let i = 0; i < skus.length; i += 5) {
       if (!state.preview || state.preview.key !== key) return;
       const res = await api('/api/preview', { method: 'POST', body: { skus: skus.slice(i, i + 5), platforms: targets } });
@@ -1069,12 +1072,15 @@ function drawPreview(total, targets) {
     const tab = pv.tab[it.sku] || targets.find((t) => it.platforms[t]);
     return `<article class="panel pv" data-sku="${esc(it.sku)}">
       <div class="pv-head"><h3>${esc(it.title)} <span class="muted">${esc(it.sku)}</span></h3>
-        <button class="ghost small-btn" data-ugc="${esc(it.sku)}">Mídia UGC</button>
-        ${it.pricing ? `<span class="badge info" title="Definido na Precificação">Preço de venda ${money(it.pricing.final)} · origem ${money(it.pricing.origin)} · ${esc(STRATEGY[it.pricing.strategy] || it.pricing.strategy)}</span>` : ''}</div>
+        <span class="pv-actions">
+          ${it.pricing ? `<span class="badge info" title="Definido na Precificação">Preço de venda ${money(it.pricing.final)} · origem ${money(it.pricing.origin)} · ${esc(STRATEGY[it.pricing.strategy] || it.pricing.strategy)}</span>` : ''}
+          <button class="ghost small-btn" data-ugc="${esc(it.sku)}">Mídia UGC</button>
+          <button class="ghost small-btn" data-audit="${esc(it.sku)}">Auditar com IA</button></span></div>
       <div class="pv-tabs">${targets.filter((t) => it.platforms[t]).map((t) => {
         const r = it.platforms[t];
         return `<button data-tab="${t}" class="${t === tab ? 'on' : ''}">${r.ready ? '✅' : '⛔'} ${PLAT[t]}</button>`;
       }).join('')}</div>
+      <div class="pv-audit" data-audit-box="${esc(it.sku)}">${auditBox(pv.audits[it.sku])}</div>
       <div class="pv-body">${previewBody(it, tab)}</div></article>`;
   }).join('');
   document.querySelectorAll('.pv[data-sku]').forEach((card) => {
@@ -1083,7 +1089,34 @@ function drawPreview(total, targets) {
     const inc = card.querySelector('[data-include]');
     if (inc) inc.onchange = () => { pv.include[inc.dataset.include] = inc.checked; drawPreview(total, targets); };
     card.querySelector('[data-ugc]').onclick = () => openUgc(pv.items.filter((x) => !x.missing).map((x) => x.sku), sku);
+    card.querySelector('[data-audit]').onclick = (e) => busy(e.target, async () => {
+      pv.audits[sku] = await api(`/api/ai/auditor/${encodeURIComponent(sku)}`, { method: 'POST', body: { platforms: targets } });
+      card.querySelector('[data-audit-box]').innerHTML = auditBox(pv.audits[sku], true);
+    });
+    // Última auditoria salva (sem chamar a IA de novo).
+    if (!(sku in pv.audits)) {
+      pv.audits[sku] = null;
+      api(`/api/ai/auditor/${encodeURIComponent(sku)}`).then((r) => {
+        pv.audits[sku] = r.audit;
+        const box = document.querySelector(`[data-audit-box="${CSS.escape(sku)}"]`);
+        if (box && r.audit) box.innerHTML = auditBox(r.audit);
+      }).catch(() => {});
+    }
   });
+}
+
+const SEV = { alta: 'err', media: 'warn', baixa: 'info' };
+function auditBox(a, open) {
+  if (!a) return '';
+  const where = (x) => (x.platform === 'todas' ? 'todos' : PLAT[x.platform] || x.platform);
+  return `<details class="audit" ${open ? 'open' : ''}><summary><b>Auditoria de IA</b> · nota <b>${a.score ?? '—'}</b>/10 · ${a.findings.length} achado(s)
+      <span class="muted">· ${esc(a.model)} · ${when(a.createdAt)}</span></summary>
+    ${a.summary ? `<p>${esc(a.summary)}</p>` : ''}
+    ${a.findings.length ? `<div class="table-wrap"><table><tr><th>Gravidade</th><th>Onde</th><th>Problema</th><th>Sugestão</th></tr>
+      ${a.findings.map((x) => `<tr><td><span class="badge ${SEV[x.severity] || ''}">${esc(x.severity)}</span></td><td class="nowrap">${esc(x.field)}<span class="sub">${esc(where(x))}</span></td>
+        <td>${esc(x.problem)}</td><td>${esc(x.suggestion)}</td></tr>`).join('')}</table></div>` : '<p class="muted">Nenhum problema encontrado.</p>'}
+    ${Object.keys(a.titles || {}).length ? `<h4 style="margin:12px 0 6px">Títulos sugeridos</h4><dl class="kv">${Object.entries(a.titles).map(([pid, t]) => `<dt>${esc(PLAT[pid] || pid)}</dt><dd>${esc(t)}<small>${t.length} caracteres</small></dd>`).join('')}</dl>` : ''}
+    <p class="muted small">Sugestões da IA: confira antes de alterar o cadastro na origem. Nada é mudado automaticamente.</p></details>`;
 }
 
 function previewBody(it, pid) {
@@ -1108,6 +1141,144 @@ function previewBody(it, pid) {
       </table></div>` : ''}`;
 }
 
+// ======================================================== Agentes de IA
+// Provedores de IA (uma chave por provedor, cifrada no servidor) e, para cada
+// agente, qual provedor e qual modelo executam cada função.
+const KIND_LABEL = { text: 'texto', image: 'imagem', video: 'vídeo' };
+state.ai = { data: null, pick: null };
+
+async function viewAgentes() {
+  state.ai.data = await api('/api/ai');
+  drawAgentes();
+}
+
+function drawAgentes() {
+  const s = state.ai.data;
+  const cur = s.providers.find((p) => p.id === state.ai.pick);
+  const caps = (p) => ['text', 'image', 'video'].filter((k) => p.can[k]).map((k) => KIND_LABEL[k]).join(' · ');
+  $app.innerHTML = `
+    <div class="view-head"><div><h1>Agentes de IA</h1>
+      <p class="muted">Conecte os provedores com a sua chave de API e escolha o modelo que executa cada agente. As chaves ficam cifradas no servidor; cada provedor cobra direto na sua conta.</p></div></div>
+    <section class="panel">
+      <h3 style="margin-top:0">Provedores de IA</h3>
+      <p class="muted">Quer uma chave só? O <b>OpenRouter</b> dá acesso a centenas de modelos (Llama, Qwen, DeepSeek, Gemini, GPT, Grok…) com uma única conta,
+        escolhe o fornecedor mais barato na hora e troca de modelo mudando só o nome.</p>
+      <div class="origins">${s.providers.map((p) => `<button type="button" class="origin ${cur && p.id === cur.id ? 'on' : ''}" data-ai-provider="${esc(p.id)}">
+        <span class="kind">${esc(caps(p))}</span><b>${esc(p.name)}</b><small>${esc(p.note || '')}</small>
+        ${p.connected ? `<small class="sale">conectado ${esc(p.key)}</small>` : '<small class="muted">não conectado</small>'}</button>`).join('')}</div>
+      ${cur ? aiProviderForm(cur) : '<p class="muted" style="margin-bottom:0">Clique num provedor para conectar, testar ou trocar a chave.</p>'}
+    </section>
+    ${s.agents.map(aiAgentPanel).join('')}`;
+  wireAgentes();
+}
+
+function aiProviderForm(p) {
+  return `<div id="ai-form" class="ai-form">
+    <div class="grid2">
+      <div class="fld"><label>Chave de API de ${esc(p.name)} *<span class="help"><a href="${esc(p.docsUrl)}" target="_blank" rel="noopener">onde obter</a> · fica cifrada no servidor</span></label>
+        <input name="apiKey" type="password" autocomplete="off" placeholder="${esc(p.key || 'cole a chave aqui')}"></div>
+      ${(p.fields || []).map((f) => field(f, p.extra[f.key])).join('')}
+    </div>
+    <div class="actions">
+      ${p.connected ? '<button class="ghost" id="ai-unlink">Remover chave</button>' : ''}
+      <button id="ai-test" ${p.connected ? '' : 'disabled title="Salve a chave primeiro"'}>Testar conexão</button>
+      <button id="ai-save" class="primary">Salvar ${esc(p.name)}</button>
+    </div></div>`;
+}
+
+function aiModelOptions(p, kind) {
+  if (!p) return '';
+  const rec = (p.recommended || {})[kind] || [];
+  return [...new Set([...rec, ...((p.models || {})[kind] || [])])].map((m) => `<option value="${esc(m)}">${rec.includes(m) ? 'recomendado' : ''}</option>`).join('');
+}
+
+function aiAgentPanel(a) {
+  const s = state.ai.data;
+  const soon = a.status !== 'ativo';
+  const slotField = (sl) => {
+    const opts = s.providers.filter((p) => p.can[sl.kind] && p.connected);
+    const p = s.providers.find((x) => x.id === sl.provider);
+    const rec = p && ((p.recommended || {})[sl.kind] || []);
+    return `<div class="fld"><label>${esc(sl.label)}${sl.optional ? ' <span class="muted">(opcional)</span>' : ''}
+        <span class="help">${esc(sl.help || `Provedor e modelo de ${KIND_LABEL[sl.kind]}`)}</span></label>
+      <div class="slot-row">
+        <select data-slot-provider="${esc(sl.key)}" data-kind="${esc(sl.kind)}">
+          <option value="">${opts.length ? '— nenhum —' : `— conecte um provedor de ${KIND_LABEL[sl.kind]} —`}</option>
+          ${opts.map((x) => `<option value="${esc(x.id)}" ${x.id === sl.provider ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
+        </select>
+        <input data-slot-model="${esc(sl.key)}" list="dl-${esc(a.id)}-${esc(sl.key)}" value="${esc(sl.model || '')}"
+          placeholder="${esc(p ? (p.defaults || {})[sl.kind] || 'id do modelo' : 'escolha o provedor')}" autocomplete="off" ${sl.provider ? '' : 'disabled'}>
+        <datalist id="dl-${esc(a.id)}-${esc(sl.key)}">${aiModelOptions(p, sl.kind)}</datalist>
+      </div>
+      ${rec && rec.length ? `<span class="help">Recomendado: ${rec.map(esc).join(', ')}</span>` : ''}</div>`;
+  };
+  return `<section class="panel agent" data-agent="${esc(a.id)}">
+    <div class="agent-head"><h3>${esc(a.name)}</h3><span class="badge ${soon ? 'warn' : 'ok'}">${esc(a.status)}</span></div>
+    <p class="muted">${esc(a.description)}</p>
+    <div class="grid2">
+      ${a.slots.map(slotField).join('')}
+      ${a.options.map((o) => `<div class="fld"><label>${esc(o.label)}${o.help ? `<span class="help">${esc(o.help)}</span>` : ''}</label>
+        <input data-option="${esc(o.key)}" inputmode="numeric" value="${esc(a.values[o.key])}"></div>`).join('')}
+    </div>
+    <div class="actions"><button class="primary" data-save-agent="${esc(a.id)}">Salvar ${esc(a.name)}</button></div>
+  </section>`;
+}
+
+function wireAgentes() {
+  const s = state.ai.data;
+  const apply = async (payload, url, msg) => {
+    state.ai.data = await api(url, { method: 'PUT', body: payload });
+    toast(msg);
+    drawAgentes();
+  };
+  $app.querySelectorAll('[data-ai-provider]').forEach((b) => {
+    b.onclick = () => { state.ai.pick = state.ai.pick === b.dataset.aiProvider ? null : b.dataset.aiProvider; drawAgentes(); };
+  });
+  const cur = s.providers.find((p) => p.id === state.ai.pick);
+  if (cur) {
+    const form = document.getElementById('ai-form');
+    form.querySelector('#ai-save').onclick = (e) => busy(e.target, () => {
+      const f = readFields(form);
+      const extra = Object.fromEntries((cur.fields || []).map((x) => [x.key, f[x.key]]));
+      return apply({ apiKey: f.apiKey, extra }, `/api/ai/providers/${encodeURIComponent(cur.id)}`, `${cur.name} salvo`);
+    });
+    form.querySelector('#ai-test').onclick = (e) => busy(e.target, async () => {
+      const r = await api(`/api/ai/providers/${encodeURIComponent(cur.id)}/test`, { method: 'POST' });
+      toast(`Conexão OK${r.account ? `: ${r.account}` : ''}${r.warning ? ` — atenção: ${r.warning}` : ''}`);
+    });
+    const unlink = form.querySelector('#ai-unlink');
+    if (unlink) {
+      unlink.onclick = (e) => busy(e.target, async () => {
+        if (!confirm(`Remover a chave de ${cur.name}? Os agentes que usam este provedor ficam sem modelo até você escolher outro.`)) return;
+        await apply({ removeKey: true }, `/api/ai/providers/${encodeURIComponent(cur.id)}`, `Chave de ${cur.name} removida`);
+      });
+    }
+  }
+  $app.querySelectorAll('section.agent').forEach((sec) => {
+    // Trocar o provedor de uma função atualiza as sugestões de modelo.
+    sec.querySelectorAll('[data-slot-provider]').forEach((sel) => {
+      sel.onchange = () => {
+        const p = s.providers.find((x) => x.id === sel.value);
+        const input = sec.querySelector(`[data-slot-model="${sel.dataset.slotProvider}"]`);
+        input.disabled = !p;
+        input.value = p ? (p.defaults || {})[sel.dataset.kind] || '' : '';
+        input.placeholder = p ? 'id do modelo' : 'escolha o provedor';
+        document.getElementById(input.getAttribute('list')).innerHTML = aiModelOptions(p, sel.dataset.kind);
+      };
+    });
+    sec.querySelector('[data-save-agent]').onclick = (e) => busy(e.target, () => {
+      const slots = {};
+      sec.querySelectorAll('[data-slot-provider]').forEach((sel) => {
+        slots[sel.dataset.slotProvider] = { provider: sel.value, model: sec.querySelector(`[data-slot-model="${sel.dataset.slotProvider}"]`).value };
+      });
+      const options = {};
+      sec.querySelectorAll('[data-option]').forEach((i) => { options[i.dataset.option] = i.value; });
+      const a = s.agents.find((x) => x.id === sec.dataset.agent);
+      return apply({ slots, options }, `/api/ai/agents/${encodeURIComponent(a.id)}`, `${a.name}: modelos salvos`);
+    });
+  });
+}
+
 // ====================================================== Mídia UGC (Prévia)
 // Agente de IA que cria 4 mídias com influencer UGC fictício a partir das
 // fotos e dados do produto, no modelo de IA que o usuário conectar.
@@ -1115,7 +1286,7 @@ const UGC_STATUS = {
   empty: ['não gerada', ''], draft: ['prompt pronto', 'info'], queued: ['na fila', 'info'], running: ['gerando…', 'info'],
   done: ['pronta', 'ok'], error: ['erro', 'err'],
 };
-state.ugc = { skus: [], sku: null, gender: 'feminino', poll: null, settings: null, configOpen: false };
+state.ugc = { skus: [], sku: null, gender: 'feminino', poll: null, settings: null };
 
 async function openUgc(skus, sku) {
   const u = state.ugc;
@@ -1127,7 +1298,6 @@ async function openUgc(skus, sku) {
   if (!drawer.open) drawer.showModal();
   try {
     u.settings = await api('/api/ugc/settings');
-    u.configOpen = !u.settings.use.image || !u.settings.use.video;
     drawUgc();
     await loadUgc();
   } catch (e) {
@@ -1135,67 +1305,21 @@ async function openUgc(skus, sku) {
   }
 }
 
-const ugcProv = (id) => (state.ugc.settings.providers.find((x) => x.id === id) || null);
-
+// Quem gera cada mídia — escolhido na tela Agentes de IA.
 function ugcModelLine() {
-  const s = state.ugc.settings;
-  const img = ugcProv(s.use.image);
-  const vid = ugcProv(s.use.video);
-  const writer = [img, vid].find((p) => p && p.can.text && p.connected);
-  const part = (label, p, kind, extra = '') => (p
-    ? `<span>${label}: <b>${esc(p.name)}</b> <span class="muted">${esc(p.models[kind] || '—')}${extra}</span></span>`
-    : `<span class="lvl-warn">${label}: nenhum modelo conectado</span>`);
-  return `${part('Fotos', img, 'image')} ${part('Vídeo', vid, 'video', ` · ${esc(s.videoSeconds)} s`)}
-    <span class="muted">Roteiro: ${writer ? esc(writer.models.text) : 'prompts-padrão'}</span>`;
-}
-
-function ugcConfigForm() {
-  const u = state.ugc;
-  const s = u.settings;
-  const cur = ugcProv(u.pick) || ugcProv(s.use.image) || s.providers[0];
-  const roleSelect = (kind, label, help) => {
-    const opts = s.providers.filter((p) => p.can[kind] && p.connected);
-    return `<div class="fld"><label>${label}<span class="help">${help}</span></label>
-      <select name="use_${kind}"><option value="">${opts.length ? '— escolha —' : '— conecte um provedor abaixo —'}</option>
-      ${opts.map((p) => `<option value="${esc(p.id)}" ${s.use[kind] === p.id ? 'selected' : ''}>${esc(p.name)} · ${esc(p.models[kind])}</option>`).join('')}</select></div>`;
-  };
-  const list = (kind) => `<datalist id="ugc-${kind}-opts">${(cur.options[kind] || []).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>`;
-  const modelField = (kind, label) => (cur.can[kind] ? `<div class="fld"><label>${label}<span class="help">Escolha da lista ou digite o id de outro modelo do provedor</span></label>
-      <input name="model_${kind}" list="ugc-${kind}-opts" value="${esc(cur.models[kind] || '')}" placeholder="${esc(cur.defaults[kind] || '')}" autocomplete="off">${list(kind)}</div>` : '');
-  return `<div class="ugc-config panel">
-    <h4 style="margin-top:0">Quem gera cada mídia</h4>
-    <div class="grid2" id="ugc-use">
-      ${roleSelect('image', 'Fotos (mídias 1 a 3) e roteiro', 'Provedores conectados que geram imagem')}
-      ${roleSelect('video', 'Vídeo (mídia 4)', 'Provedores conectados que geram vídeo com fala')}
-      <div class="fld"><label>Duração do vídeo (segundos)<span class="help">Ajustada ao que o modelo aceita (ex.: Gemini Omni 3–10 s)</span></label>
-        <input name="videoSeconds" type="text" inputmode="numeric" value="${esc(s.videoSeconds)}"></div>
-    </div>
-    <div class="actions"><button id="ugc-use-save" class="primary">Salvar escolha</button></div>
-    <h4>Conectar provedor de IA</h4>
-    <div class="origins">${s.providers.map((p) => `<button type="button" class="origin ${p.id === cur.id ? 'on' : ''}" data-ugc-provider="${esc(p.id)}">
-      <span class="kind">${[p.can.image ? 'imagem' : null, p.can.video ? 'vídeo' : null, p.can.text ? 'roteiro' : null].filter(Boolean).join(' · ')}</span>
-      <b>${esc(p.name)}</b><small>${esc(p.note || '')}</small>${p.connected ? `<small class="sale">conectado ${esc(p.key)}</small>` : ''}</button>`).join('')}</div>
-    <div class="grid2" id="ugc-form">
-      <div class="fld"><label>Chave de API de ${esc(cur.name)} *<span class="help"><a href="${esc(cur.docsUrl)}" target="_blank" rel="noopener">onde obter</a> · fica cifrada no servidor</span></label>
-        <input name="apiKey" type="password" autocomplete="off" placeholder="${esc(cur.key || 'cole a chave aqui')}"></div>
-      ${modelField('image', 'Modelo de imagem')}
-      ${modelField('video', 'Modelo de vídeo')}
-      ${modelField('text', 'Modelo do roteiro (agente)')}
-      ${(cur.fields || []).map((f) => field(f, cur.extra[f.key])).join('')}
-    </div>
-    <div class="actions">${s.use.image || s.use.video ? '<button class="ghost" id="ugc-cfg-cancel">Fechar</button>' : ''}
-      ${cur.connected ? '<button class="ghost" id="ugc-unlink">Remover chave</button>' : ''}
-      <button id="ugc-test" ${cur.connected ? '' : 'disabled title="Salve a chave primeiro"'}>Testar conexão</button>
-      <button id="ugc-save" class="primary">Salvar conexão de ${esc(cur.name)}</button></div>
-  </div>`;
+  const { slots, videoSeconds } = state.ugc.settings;
+  const part = (label, x, extra = '') => (x
+    ? `<span>${label}: <b>${esc(x.name)}</b> <span class="muted">${esc(x.model)}${extra}</span></span>`
+    : `<span class="lvl-warn">${label}: nenhum modelo escolhido</span>`);
+  return `${part('Fotos', slots.image)} ${part('Vídeo', slots.video, ` · ${esc(videoSeconds)} s`)}
+    <span class="muted">Roteiro: ${slots.text ? `${esc(slots.text.name)} ${esc(slots.text.model)}` : 'prompts-padrão'}</span>`;
 }
 
 function drawUgc() {
   const u = state.ugc;
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
-    <div class="status-line">${ugcModelLine()} <button class="ghost" id="ugc-cfg">${u.configOpen ? 'Ocultar' : 'Modelos de IA'}</button></div>
-    ${u.configOpen ? ugcConfigForm() : ''}
+    <div class="status-line">${ugcModelLine()} <a class="btn-link" href="#agentes" id="ugc-cfg">Escolher modelos em Agentes de IA</a></div>
     ${u.skus.length > 1 ? `<div class="pv-tabs" style="padding-left:0">${u.skus.map((s) => `<button data-ugc-sku="${esc(s)}" class="${s === u.sku ? 'on' : ''}">${esc(s)}</button>`).join('')}</div>` : ''}
     <div class="ugc-controls">
       <span class="switch" style="gap:14px"><b>Influencer:</b>
@@ -1208,7 +1332,7 @@ function drawUgc() {
     <div class="ugc-grid" id="ugc-grid"></div>
     <p class="muted small">Mídias geradas por IA com uma persona fictícia. Confira o resultado antes de publicar e sinalize o conteúdo como gerado por IA quando o marketplace exigir.</p>`;
 
-  body.querySelector('#ugc-cfg').onclick = () => { u.configOpen = !u.configOpen; drawUgc(); loadUgc(); };
+  body.querySelector('#ugc-cfg').onclick = () => document.getElementById('drawer').close();
   body.querySelectorAll('[data-ugc-sku]').forEach((b) => { b.onclick = () => { u.sku = b.dataset.ugcSku; drawUgc(); loadUgc(); }; });
   body.querySelectorAll('[name="ugc-gender"]').forEach((r) => { r.onchange = () => { u.gender = r.value; u.touchedGender = true; }; });
   body.querySelector('#ugc-plan').onclick = (e) => busy(e.target, async () => {
@@ -1226,46 +1350,6 @@ function drawUgc() {
       setTimeout(() => loadUgc().catch(() => {}), 1500);
     });
   }
-  if (u.configOpen) wireUgcConfig(body);
-}
-
-function wireUgcConfig(body) {
-  const u = state.ugc;
-  const cur = () => ugcProv(u.pick) || ugcProv(u.settings.use.image) || u.settings.providers[0];
-  const apply = async (payload, msg) => {
-    u.settings = { ...(await api('/api/ugc/settings', { method: 'PUT', body: payload })), kinds: u.settings.kinds };
-    toast(msg);
-    u.configOpen = !u.settings.use.image || !u.settings.use.video;
-    drawUgc();
-    await loadUgc();
-  };
-  body.querySelectorAll('[data-ugc-provider]').forEach((b) => { b.onclick = () => { u.pick = b.dataset.ugcProvider; drawUgc(); loadUgc(); }; });
-  const cancel = body.querySelector('#ugc-cfg-cancel');
-  if (cancel) cancel.onclick = () => { u.configOpen = false; u.pick = null; drawUgc(); loadUgc(); };
-  body.querySelector('#ugc-use-save').onclick = (e) => busy(e.target, () => {
-    const f = readFields(body.querySelector('#ugc-use'));
-    return apply({ use: { image: f.use_image || null, video: f.use_video || null }, videoSeconds: f.videoSeconds }, 'Escolha dos modelos salva');
-  });
-  body.querySelector('#ugc-save').onclick = (e) => busy(e.target, () => {
-    const f = readFields(body.querySelector('#ugc-form'));
-    const p = cur();
-    const extra = {};
-    for (const [k, v] of Object.entries(f)) if (k !== 'apiKey' && !k.startsWith('model_')) extra[k] = v;
-    u.pick = p.id;
-    return apply({ provider: p.id, apiKey: f.apiKey, extra, models: { image: f.model_image, video: f.model_video, text: f.model_text } }, `${p.name} salvo`);
-  });
-  const unlink = body.querySelector('#ugc-unlink');
-  if (unlink) {
-    unlink.onclick = (e) => busy(e.target, async () => {
-      const p = cur();
-      if (!confirm(`Remover a chave de ${p.name}? As mídias que usam este provedor deixam de ser geradas até conectar de novo.`)) return;
-      await apply({ provider: p.id, removeKey: true, models: p.models, extra: p.extra }, `Chave de ${p.name} removida`);
-    });
-  }
-  body.querySelector('#ugc-test').onclick = (e) => busy(e.target, async () => {
-    const r = await api('/api/ugc/test', { method: 'POST', body: { provider: cur().id } });
-    toast(`Conexão OK${r.account ? `: ${r.account}` : ''}${r.warning ? ` — atenção: ${r.warning}` : ''}`);
-  });
 }
 
 async function loadUgc() {
