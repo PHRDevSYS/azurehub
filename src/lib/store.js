@@ -74,6 +74,23 @@ CREATE TABLE IF NOT EXISTS price_research (
   data TEXT NOT NULL,        -- JSON: ofertas, estatísticas, fontes consultadas
   collected_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ugc_media (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku TEXT NOT NULL,
+  kind TEXT NOT NULL,        -- uso | posse | especificacoes | video
+  gender TEXT,               -- feminino | masculino
+  provider TEXT,
+  model TEXT,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL,      -- draft | queued | running | done | error
+  job TEXT,                  -- id do job assíncrono no provedor (vídeo)
+  file TEXT,                 -- caminho relativo em data/ugc
+  mime TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ugc_media_sku ON ugc_media(sku, kind, id);
 CREATE TABLE IF NOT EXISTS oauth_states (
   state TEXT PRIMARY KEY,
   platform TEXT NOT NULL,
@@ -304,6 +321,39 @@ function deleteProduct(sku) {
   run('DELETE FROM products WHERE sku = ?', sku);
 }
 
+// ---------- mídia UGC ----------
+const UGC_FIELDS = ['sku', 'kind', 'gender', 'provider', 'model', 'prompt', 'status', 'job', 'file', 'mime', 'error'];
+function ugcInsert(fields) {
+  const t = now();
+  const cols = UGC_FIELDS.filter((k) => fields[k] !== undefined);
+  return Number(run(`INSERT INTO ugc_media(${cols.join(', ')}, created_at, updated_at) VALUES(${cols.map(() => '?').join(', ')}, ?, ?)`,
+    ...cols.map((k) => fields[k]), t, t).lastInsertRowid);
+}
+function ugcUpdate(id, fields) {
+  const cols = UGC_FIELDS.filter((k) => fields[k] !== undefined);
+  if (!cols.length) return;
+  run(`UPDATE ugc_media SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`, ...cols.map((k) => fields[k]), now(), id);
+}
+const ugcGet = (id) => get('SELECT * FROM ugc_media WHERE id = ?', id) || null;
+// A versão mais recente de cada uma das 4 mídias do produto.
+function ugcLatest(sku) {
+  return all(`SELECT * FROM ugc_media WHERE id IN (SELECT MAX(id) FROM ugc_media WHERE sku = ? GROUP BY kind)`, sku);
+}
+// Última versão pronta de cada mídia (fica na tela enquanto uma nova é gerada ou se ela falhar).
+function ugcLastDone(sku) {
+  return all(`SELECT * FROM ugc_media WHERE id IN (SELECT MAX(id) FROM ugc_media WHERE sku = ? AND status = 'done' GROUP BY kind)`, sku);
+}
+// A mais recente de um tipo (com filtros opcionais de status e gênero).
+function ugcLatestOf(sku, kind, { status, gender } = {}) {
+  const where = ['sku = ?', 'kind = ?'];
+  const args = [sku, kind];
+  if (status) { where.push('status = ?'); args.push(status); }
+  if (gender) { where.push('gender = ?'); args.push(gender); }
+  return get(`SELECT * FROM ugc_media WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT 1`, ...args) || null;
+}
+const ugcHistory = (sku, limit = 40) => all('SELECT * FROM ugc_media WHERE sku = ? ORDER BY id DESC LIMIT ?', sku, limit);
+const ugcActive = () => all(`SELECT * FROM ugc_media WHERE status IN ('queued', 'running') ORDER BY id`);
+
 // ---------- vínculos (anúncios) ----------
 function getListing(platform, sku) {
   const row = get('SELECT * FROM listings WHERE platform = ? AND sku = ?', platform, sku);
@@ -438,6 +488,7 @@ module.exports = {
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
   upsertProduct, getProduct, listProducts, listSync, deleteProduct, refreshSyncHash, syncHashOf,
   getPricing, pricingFor, setPricing, getResearch, researchFor, saveResearch, refreshAllSyncHashes,
+  ugcInsert, ugcUpdate, ugcGet, ugcLatest, ugcLastDone, ugcLatestOf, ugcHistory, ugcActive,
   getListing, saveListing, listingStats, selectForPlatform, unselect, selectedSkus, syncCounts,
   enqueue, finishJob, resetStuckJobs, listJobs, jobStats, clearFinishedJobs,
   log, listLogs, jobsFor,

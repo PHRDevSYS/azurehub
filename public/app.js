@@ -1005,12 +1005,13 @@ async function viewPrevia() {
   $app.innerHTML = `
     <div class="view-head">
       <div><h1>Prévia</h1><p class="muted">Como os ${skus.length} produto(s) vão subir em cada marketplace. Nada é enviado nesta tela.</p></div>
-      <div class="toolbar" style="margin:0"><a href="#produtos" class="btn-link">Voltar para Produtos</a>${state.modules.pricing ? '<a href="#precificacao" class="btn-link">Precificação</a>' : ''}<button id="pv-send" class="primary" disabled>Enviar prontos</button></div>
+      <div class="toolbar" style="margin:0"><a href="#produtos" class="btn-link">Voltar para Produtos</a>${state.modules.pricing ? '<a href="#precificacao" class="btn-link">Precificação</a>' : ''}<button id="pv-ugc">Gerar mídia UGC</button><button id="pv-send" class="primary" disabled>Enviar prontos</button></div>
     </div>
     <div class="toolbar">${Object.keys(PLAT).map((id) => `<label class="switch"><input type="checkbox" data-pv-target="${id}" ${state.targets.has(id) ? 'checked' : ''}> ${PLAT[id]}</label>`).join('')}</div>
     <div id="pv-summary" class="status-line"></div>
     <div class="progress"><i id="pv-bar" style="width:0"></i></div>
     <div id="pv-list"></div>`;
+  document.getElementById('pv-ugc').onclick = () => openUgc(skus);
   document.querySelectorAll('[data-pv-target]').forEach((c) => {
     c.onchange = () => {
       if (c.checked) state.targets.add(c.dataset.pvTarget); else state.targets.delete(c.dataset.pvTarget);
@@ -1068,6 +1069,7 @@ function drawPreview(total, targets) {
     const tab = pv.tab[it.sku] || targets.find((t) => it.platforms[t]);
     return `<article class="panel pv" data-sku="${esc(it.sku)}">
       <div class="pv-head"><h3>${esc(it.title)} <span class="muted">${esc(it.sku)}</span></h3>
+        <button class="ghost small-btn" data-ugc="${esc(it.sku)}">Mídia UGC</button>
         ${it.pricing ? `<span class="badge info" title="Definido na Precificação">Preço de venda ${money(it.pricing.final)} · origem ${money(it.pricing.origin)} · ${esc(STRATEGY[it.pricing.strategy] || it.pricing.strategy)}</span>` : ''}</div>
       <div class="pv-tabs">${targets.filter((t) => it.platforms[t]).map((t) => {
         const r = it.platforms[t];
@@ -1080,6 +1082,7 @@ function drawPreview(total, targets) {
     card.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { pv.tab[sku] = b.dataset.tab; drawPreview(total, targets); }; });
     const inc = card.querySelector('[data-include]');
     if (inc) inc.onchange = () => { pv.include[inc.dataset.include] = inc.checked; drawPreview(total, targets); };
+    card.querySelector('[data-ugc]').onclick = () => openUgc(pv.items.filter((x) => !x.missing).map((x) => x.sku), sku);
   });
 }
 
@@ -1103,6 +1106,222 @@ function previewBody(it, pid) {
       <div class="table-wrap"><table><tr><th>SKU</th><th>Opções</th><th class="num">Preço</th><th class="num">Promo</th><th class="num">Estoque</th><th>GTIN</th></tr>
       ${r.variants.map((v) => `<tr><td>${esc(v.sku)}</td><td>${esc(v.options)}</td><td class="num">${esc(v.price)}</td><td class="num">${esc(v.promoPrice)}</td><td class="num">${esc(v.stock)}</td><td>${esc(v.gtin)}</td></tr>`).join('')}
       </table></div>` : ''}`;
+}
+
+// ====================================================== Mídia UGC (Prévia)
+// Agente de IA que cria 4 mídias com influencer UGC fictício a partir das
+// fotos e dados do produto, no modelo de IA que o usuário conectar.
+const UGC_STATUS = {
+  empty: ['não gerada', ''], draft: ['prompt pronto', 'info'], queued: ['na fila', 'info'], running: ['gerando…', 'info'],
+  done: ['pronta', 'ok'], error: ['erro', 'err'],
+};
+state.ugc = { skus: [], sku: null, gender: 'feminino', poll: null, settings: null, configOpen: false };
+
+async function openUgc(skus, sku) {
+  const u = state.ugc;
+  u.skus = skus;
+  u.sku = sku || skus[0];
+  const drawer = document.getElementById('drawer');
+  document.getElementById('drawer-title').textContent = 'Gerar mídia UGC';
+  document.getElementById('drawer-body').innerHTML = '<p class="muted">Carregando…</p>';
+  if (!drawer.open) drawer.showModal();
+  try {
+    u.settings = await api('/api/ugc/settings');
+    u.configOpen = !u.settings.use.image || !u.settings.use.video;
+    drawUgc();
+    await loadUgc();
+  } catch (e) {
+    document.getElementById('drawer-body').innerHTML = `<p class="lvl-error">${esc(e.message)}</p>`;
+  }
+}
+
+const ugcProv = (id) => (state.ugc.settings.providers.find((x) => x.id === id) || null);
+
+function ugcModelLine() {
+  const s = state.ugc.settings;
+  const img = ugcProv(s.use.image);
+  const vid = ugcProv(s.use.video);
+  const writer = [img, vid].find((p) => p && p.can.text && p.connected);
+  const part = (label, p, kind, extra = '') => (p
+    ? `<span>${label}: <b>${esc(p.name)}</b> <span class="muted">${esc(p.models[kind] || '—')}${extra}</span></span>`
+    : `<span class="lvl-warn">${label}: nenhum modelo conectado</span>`);
+  return `${part('Fotos', img, 'image')} ${part('Vídeo', vid, 'video', ` · ${esc(s.videoSeconds)} s`)}
+    <span class="muted">Roteiro: ${writer ? esc(writer.models.text) : 'prompts-padrão'}</span>`;
+}
+
+function ugcConfigForm() {
+  const u = state.ugc;
+  const s = u.settings;
+  const cur = ugcProv(u.pick) || ugcProv(s.use.image) || s.providers[0];
+  const roleSelect = (kind, label, help) => {
+    const opts = s.providers.filter((p) => p.can[kind] && p.connected);
+    return `<div class="fld"><label>${label}<span class="help">${help}</span></label>
+      <select name="use_${kind}"><option value="">${opts.length ? '— escolha —' : '— conecte um provedor abaixo —'}</option>
+      ${opts.map((p) => `<option value="${esc(p.id)}" ${s.use[kind] === p.id ? 'selected' : ''}>${esc(p.name)} · ${esc(p.models[kind])}</option>`).join('')}</select></div>`;
+  };
+  const list = (kind) => `<datalist id="ugc-${kind}-opts">${(cur.options[kind] || []).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>`;
+  const modelField = (kind, label) => (cur.can[kind] ? `<div class="fld"><label>${label}<span class="help">Escolha da lista ou digite o id de outro modelo do provedor</span></label>
+      <input name="model_${kind}" list="ugc-${kind}-opts" value="${esc(cur.models[kind] || '')}" placeholder="${esc(cur.defaults[kind] || '')}" autocomplete="off">${list(kind)}</div>` : '');
+  return `<div class="ugc-config panel">
+    <h4 style="margin-top:0">Quem gera cada mídia</h4>
+    <div class="grid2" id="ugc-use">
+      ${roleSelect('image', 'Fotos (mídias 1 a 3) e roteiro', 'Provedores conectados que geram imagem')}
+      ${roleSelect('video', 'Vídeo (mídia 4)', 'Provedores conectados que geram vídeo com fala')}
+      <div class="fld"><label>Duração do vídeo (segundos)<span class="help">Ajustada ao que o modelo aceita (ex.: Gemini Omni 3–10 s)</span></label>
+        <input name="videoSeconds" type="text" inputmode="numeric" value="${esc(s.videoSeconds)}"></div>
+    </div>
+    <div class="actions"><button id="ugc-use-save" class="primary">Salvar escolha</button></div>
+    <h4>Conectar provedor de IA</h4>
+    <div class="origins">${s.providers.map((p) => `<button type="button" class="origin ${p.id === cur.id ? 'on' : ''}" data-ugc-provider="${esc(p.id)}">
+      <span class="kind">${[p.can.image ? 'imagem' : null, p.can.video ? 'vídeo' : null, p.can.text ? 'roteiro' : null].filter(Boolean).join(' · ')}</span>
+      <b>${esc(p.name)}</b><small>${esc(p.note || '')}</small>${p.connected ? `<small class="sale">conectado ${esc(p.key)}</small>` : ''}</button>`).join('')}</div>
+    <div class="grid2" id="ugc-form">
+      <div class="fld"><label>Chave de API de ${esc(cur.name)} *<span class="help"><a href="${esc(cur.docsUrl)}" target="_blank" rel="noopener">onde obter</a> · fica cifrada no servidor</span></label>
+        <input name="apiKey" type="password" autocomplete="off" placeholder="${esc(cur.key || 'cole a chave aqui')}"></div>
+      ${modelField('image', 'Modelo de imagem')}
+      ${modelField('video', 'Modelo de vídeo')}
+      ${modelField('text', 'Modelo do roteiro (agente)')}
+      ${(cur.fields || []).map((f) => field(f, cur.extra[f.key])).join('')}
+    </div>
+    <div class="actions">${s.use.image || s.use.video ? '<button class="ghost" id="ugc-cfg-cancel">Fechar</button>' : ''}
+      ${cur.connected ? '<button class="ghost" id="ugc-unlink">Remover chave</button>' : ''}
+      <button id="ugc-test" ${cur.connected ? '' : 'disabled title="Salve a chave primeiro"'}>Testar conexão</button>
+      <button id="ugc-save" class="primary">Salvar conexão de ${esc(cur.name)}</button></div>
+  </div>`;
+}
+
+function drawUgc() {
+  const u = state.ugc;
+  const body = document.getElementById('drawer-body');
+  body.innerHTML = `
+    <div class="status-line">${ugcModelLine()} <button class="ghost" id="ugc-cfg">${u.configOpen ? 'Ocultar' : 'Trocar modelo'}</button></div>
+    ${u.configOpen ? ugcConfigForm() : ''}
+    ${u.skus.length > 1 ? `<div class="pv-tabs" style="padding-left:0">${u.skus.map((s) => `<button data-ugc-sku="${esc(s)}" class="${s === u.sku ? 'on' : ''}">${esc(s)}</button>`).join('')}</div>` : ''}
+    <div class="ugc-controls">
+      <span class="switch" style="gap:14px"><b>Influencer:</b>
+        ${['feminino', 'masculino'].map((g) => `<label class="switch"><input type="radio" name="ugc-gender" value="${g}" ${u.gender === g ? 'checked' : ''}> ${g === 'feminino' ? 'Feminino' : 'Masculino'}</label>`).join('')}</span>
+      <button id="ugc-plan">Criar roteiro com o agente</button>
+      <button id="ugc-all" class="primary">Gerar as 4 mídias</button>
+    </div>
+    <p class="muted" id="ugc-note"></p>
+    <div class="ugc-grid" id="ugc-grid"></div>
+    <p class="muted small">Mídias geradas por IA com uma persona fictícia. Confira o resultado antes de publicar e sinalize o conteúdo como gerado por IA quando o marketplace exigir.</p>`;
+
+  body.querySelector('#ugc-cfg').onclick = () => { u.configOpen = !u.configOpen; drawUgc(); loadUgc(); };
+  body.querySelectorAll('[data-ugc-sku]').forEach((b) => { b.onclick = () => { u.sku = b.dataset.ugcSku; drawUgc(); loadUgc(); }; });
+  body.querySelectorAll('[name="ugc-gender"]').forEach((r) => { r.onchange = () => { u.gender = r.value; u.touchedGender = true; }; });
+  body.querySelector('#ugc-plan').onclick = (e) => busy(e.target, async () => {
+    const r = await api(`/api/ugc/${encodeURIComponent(u.sku)}/plan`, { method: 'POST', body: { gender: u.gender } });
+    document.getElementById('ugc-note').textContent = r.note;
+    drawUgcCards(r.items, true);
+  });
+  body.querySelector('#ugc-all').onclick = (e) => busy(e.target, () => ugcGenerate(['uso', 'posse', 'especificacoes', 'video']));
+  if (u.configOpen) wireUgcConfig(body);
+}
+
+function wireUgcConfig(body) {
+  const u = state.ugc;
+  const cur = () => ugcProv(u.pick) || ugcProv(u.settings.use.image) || u.settings.providers[0];
+  const apply = async (payload, msg) => {
+    u.settings = { ...(await api('/api/ugc/settings', { method: 'PUT', body: payload })), kinds: u.settings.kinds };
+    toast(msg);
+    u.configOpen = !u.settings.use.image || !u.settings.use.video;
+    drawUgc();
+    await loadUgc();
+  };
+  body.querySelectorAll('[data-ugc-provider]').forEach((b) => { b.onclick = () => { u.pick = b.dataset.ugcProvider; drawUgc(); loadUgc(); }; });
+  const cancel = body.querySelector('#ugc-cfg-cancel');
+  if (cancel) cancel.onclick = () => { u.configOpen = false; u.pick = null; drawUgc(); loadUgc(); };
+  body.querySelector('#ugc-use-save').onclick = (e) => busy(e.target, () => {
+    const f = readFields(body.querySelector('#ugc-use'));
+    return apply({ use: { image: f.use_image || null, video: f.use_video || null }, videoSeconds: f.videoSeconds }, 'Escolha dos modelos salva');
+  });
+  body.querySelector('#ugc-save').onclick = (e) => busy(e.target, () => {
+    const f = readFields(body.querySelector('#ugc-form'));
+    const p = cur();
+    const extra = {};
+    for (const [k, v] of Object.entries(f)) if (k !== 'apiKey' && !k.startsWith('model_')) extra[k] = v;
+    u.pick = p.id;
+    return apply({ provider: p.id, apiKey: f.apiKey, extra, models: { image: f.model_image, video: f.model_video, text: f.model_text } }, `${p.name} salvo`);
+  });
+  const unlink = body.querySelector('#ugc-unlink');
+  if (unlink) {
+    unlink.onclick = (e) => busy(e.target, async () => {
+      const p = cur();
+      if (!confirm(`Remover a chave de ${p.name}? As mídias que usam este provedor deixam de ser geradas até conectar de novo.`)) return;
+      await apply({ provider: p.id, removeKey: true, models: p.models, extra: p.extra }, `Chave de ${p.name} removida`);
+    });
+  }
+  body.querySelector('#ugc-test').onclick = (e) => busy(e.target, async () => {
+    const r = await api('/api/ugc/test', { method: 'POST', body: { provider: cur().id } });
+    toast(`Conexão OK${r.account ? `: ${r.account}` : ''}${r.warning ? ` — atenção: ${r.warning}` : ''}`);
+  });
+}
+
+async function loadUgc() {
+  const u = state.ugc;
+  clearTimeout(u.poll);
+  const sku = u.sku;
+  const r = await api(`/api/ugc/${encodeURIComponent(sku)}`);
+  if (u.sku !== sku || !document.getElementById('ugc-grid')) return;
+  const g = r.items.find((x) => x.gender);
+  if (g && !u.touchedGender) u.gender = g.gender;
+  document.querySelectorAll('[name="ugc-gender"]').forEach((x) => { x.checked = x.value === u.gender; });
+  drawUgcCards(r.items, false);
+  if (r.items.some((x) => ['queued', 'running'].includes(x.status))) {
+    u.poll = setTimeout(() => { if (document.getElementById('drawer').open) loadUgc().catch(() => {}); }, 4000);
+  }
+}
+
+function ugcMedia(it) {
+  const working = it.status === 'running' || it.status === 'queued';
+  const shown = it.url ? it : it.previous;
+  if (!shown) return `<div class="ugc-ph">${working ? (it.kind === 'video' ? 'Gerando o vídeo — pode levar alguns minutos…' : 'Gerando…') : 'Sem mídia ainda'}</div>`;
+  const src = `${shown.url}?v=${shown.id}`;
+  const tag = shown === it ? '' : `<span class="ugc-tag">${working ? 'gerando nova versão… (abaixo, a anterior)' : 'versão anterior'}</span>`;
+  return tag + (shown.mime && shown.mime.startsWith('video/')
+    ? `<video src="${esc(src)}" controls preload="metadata" playsinline></video>`
+    : `<a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="${esc(it.kind)}"></a>`);
+}
+
+// Redesenha os cartões sem apagar o que o usuário está editando nos prompts.
+function drawUgcCards(items, resetPrompts) {
+  const grid = document.getElementById('ugc-grid');
+  if (!grid) return;
+  const labels = Object.fromEntries((state.ugc.settings.kinds || []).map((k) => [k.kind, k.label]));
+  const typed = {};
+  grid.querySelectorAll('textarea[data-kind]').forEach((t) => { if (t.dataset.dirty) typed[t.dataset.kind] = t.value; });
+  const order = ['uso', 'posse', 'especificacoes', 'video'];
+  grid.innerHTML = order.map((kind, i) => {
+    const it = items.find((x) => x.kind === kind) || { kind, status: 'empty' };
+    const [label, cls] = UGC_STATUS[it.status] || [it.status, ''];
+    const prompt = !resetPrompts && typed[kind] !== undefined ? typed[kind] : (it.prompt || '');
+    const working = ['queued', 'running'].includes(it.status);
+    return `<article class="ugc-card" data-kind="${kind}">
+      <header><b>${i + 1}. ${esc(labels[kind] || kind)}</b> <span class="badge ${cls}">${esc(label)}</span></header>
+      <div class="ugc-media">${ugcMedia(it)}</div>
+      ${it.status === 'error' ? `<p class="lvl-error small">${esc(it.error)}</p>` : ''}
+      ${it.model ? `<p class="muted small">${esc(it.provider)} · ${esc(it.model)}</p>` : ''}
+      <label class="small">Prompt (edite e gere de novo quando quiser)</label>
+      <textarea data-kind="${kind}" class="ugc-prompt" ${!resetPrompts && typed[kind] !== undefined ? 'data-dirty="1"' : ''} placeholder="Clique em “Criar roteiro com o agente” para preencher">${esc(prompt)}</textarea>
+      <div class="actions" style="margin-top:8px">
+        ${(it.url || (it.previous && it.previous.url)) ? `<a class="btn-link" href="${esc(it.url || it.previous.url)}?download=1">Baixar${it.url ? '' : ' anterior'}</a>` : ''}
+        <button data-gen="${kind}" class="primary" ${working ? 'disabled' : ''}>${it.url || it.previous || it.status === 'error' ? 'Gerar de novo' : 'Gerar'}</button>
+      </div></article>`;
+  }).join('');
+  grid.querySelectorAll('textarea[data-kind]').forEach((t) => { t.oninput = () => { t.dataset.dirty = '1'; }; });
+  grid.querySelectorAll('[data-gen]').forEach((b) => { b.onclick = () => busy(b, () => ugcGenerate([b.dataset.gen])); });
+}
+
+async function ugcGenerate(kinds) {
+  const u = state.ugc;
+  const items = kinds.map((kind) => ({ kind, prompt: (document.querySelector(`textarea[data-kind="${kind}"]`) || {}).value || '' }));
+  if (items.some((x) => !x.prompt.trim())) throw new Error('Preencha os prompts: clique em “Criar roteiro com o agente” ou escreva o seu');
+  const r = await api(`/api/ugc/${encodeURIComponent(u.sku)}/generate`, { method: 'POST', body: { gender: u.gender, items } });
+  toast(`${r.queued} mídia(s) na fila de geração`);
+  document.querySelectorAll('textarea[data-kind]').forEach((t) => { if (kinds.includes(t.dataset.kind)) delete t.dataset.dirty; });
+  drawUgcCards(r.items, false);
+  await loadUgc();
 }
 
 // ======================================================== Sincronização

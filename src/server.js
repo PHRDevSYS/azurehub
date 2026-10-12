@@ -14,6 +14,7 @@ function createServer() {
   const api = require('./routes/api');
   api.register(router);
   require('./routes/pricing').register(router, { requireAdmin: api.requireAdmin });
+  require('./routes/ugc').register(router, { requireAdmin: api.requireAdmin });
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');
@@ -44,6 +45,7 @@ if (require.main === module) {
     console.log(`AzureHub ${config.VERSION} em ${config.publicUrl} (porta ${config.port})`);
   });
   engine.start();
+  require('./ugc/runner').resume(); // gerações de mídia UGC interrompidas
   const shutdown = () => {
     engine.stop();
     server.close(() => { store.close(); process.exit(0); });

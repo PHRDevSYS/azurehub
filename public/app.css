@@ -205,3 +205,24 @@ td.down, .sub.down { color: var(--ok); }
   main { padding: 16px 16px 64px; }
   .actionbar { flex-direction: column; align-items: stretch; }
 }
+
+/* ---------- mídia UGC (Prévia) ---------- */
+.small { font-size: 12px; }
+.small-btn { padding: 4px 10px; font-size: 13px; }
+.pv-head { align-items: center; }
+.ugc-controls { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 14px 0 4px; }
+.ugc-controls .switch { margin: 0; }
+.ugc-config { margin: 12px 0; padding: 16px; }
+.ugc-config .origins { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.ugc-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 10px; }
+@media (max-width: 760px) { .ugc-grid { grid-template-columns: 1fr; } }
+.ugc-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: var(--surface); display: flex; flex-direction: column; min-width: 0; }
+.ugc-card header { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ugc-card label { margin-top: 8px; }
+.ugc-media { position: relative; background: var(--bg); border-radius: 10px; overflow: hidden; display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 5; }
+.ugc-tag { position: absolute; top: 8px; left: 8px; z-index: 1; background: rgba(15, 23, 42, .78); color: #fff; font-size: 12px; padding: 3px 8px; border-radius: 999px; pointer-events: none; }
+.ugc-card[data-kind="video"] .ugc-media { aspect-ratio: 9 / 16; max-height: 460px; }
+.ugc-media img, .ugc-media video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ugc-media a { display: block; width: 100%; height: 100%; }
+.ugc-ph { color: var(--muted); font-size: 13px; padding: 16px; text-align: center; }
+textarea.ugc-prompt { min-height: 150px; font-size: 13px; line-height: 1.45; }
