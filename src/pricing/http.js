@@ -7,7 +7,6 @@
 // terceiros): só http(s); nunca endereços internos (loopback, rede privada,
 // link-local/metadados da nuvem), conferido em cada redirecionamento; corpo
 // limitado a MAX_BYTES; cache com teto de entradas.
-const dns = require('node:dns');
 const net = require('node:net');
 const config = require('../config');
 
@@ -22,31 +21,11 @@ class PriceSourceError extends Error {}
 
 const timing = { sleep: (ms) => new Promise((ok) => setTimeout(ok, ms)), now: () => Date.now() };
 // Resolução de nomes sobrescrevível nos testes.
-const resolver = { lookup: (host) => dns.promises.lookup(host, { all: true, verbatim: true }) };
 const lastByHost = new Map();
 const cache = new Map();
 const robotsCache = new Map();
 
-// ------------------------------------------------------ endereços internos
-function ipv4Private(ip) {
-  const [a, b] = ip.split('.').map(Number);
-  return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19))
-    || a >= 224;
-}
-
-function isPrivateAddress(ip) {
-  if (net.isIPv4(ip)) return ipv4Private(ip);
-  const v = ip.toLowerCase().replace(/^\[|\]$/g, '');
-  const mapped = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return ipv4Private(mapped[1]);
-  if (/^::ffff:[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(v)) {
-    const [hi, lo] = v.slice(7).split(':').map((h) => parseInt(h, 16));
-    return ipv4Private(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
-  }
-  // "::"... (não especificado, loopback, IPv4-compatível como ::7f00:1) é todo reservado.
-  return v.startsWith('::') || /^f[cd]/.test(v) || /^fe[89ab]/.test(v) || /^ff/.test(v) || /^64:ff9b:/.test(v) || /^2001:db8:/.test(v);
-}
+const { isPrivateAddress, resolver } = require('../lib/netguard');
 
 // Liberado só por PRICE_ALLOW_PRIVATE=1 (ex.: loja de teste na rede local).
 const allowPrivate = () => process.env.PRICE_ALLOW_PRIVATE === '1';

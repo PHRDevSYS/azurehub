@@ -33,9 +33,19 @@ function requireApiKeyOrAdmin(ctx) {
 }
 
 // Proteção simples contra força bruta no login.
+// A chave é (IP do cliente, e-mail): um anônimo não consegue bloquear o
+// administrador que entra de outro IP. Atrás do nginx (conexão de loopback),
+// o IP real vem de X-Real-IP / X-Forwarded-For.
 const attempts = new Map();
-function throttle(ip) {
-  const a = attempts.get(ip) || { n: 0, until: 0 };
+const ATTEMPTS_MAX = 5000;
+function clientIp(req) {
+  const ip = req.socket.remoteAddress || '';
+  if (!/^(127\.|::1$|::ffff:127\.)/.test(ip)) return ip;
+  const real = req.headers['x-real-ip'] || String(req.headers['x-forwarded-for'] || '').split(',').pop();
+  return String(real || ip).trim().slice(0, 64);
+}
+function throttle(key) {
+  const a = attempts.get(key) || { n: 0, until: 0 };
   if (a.until > Date.now()) throw new HttpError(429, 'Muitas tentativas. Aguarde alguns minutos.');
   return a;
 }
@@ -130,17 +140,18 @@ function register(r) {
   // ---------- sessão ----------
   r.post('/api/login', async (ctx) => {
     requireInstalled();
-    const ip = ctx.req.socket.remoteAddress;
-    const a = throttle(ip);
     const { email, password } = await readJson(ctx.req);
+    const key = `${clientIp(ctx.req)}|${String(email || '').toLowerCase().slice(0, 200)}`;
+    const a = throttle(key);
     const admin = store.getSetting('admin');
     if (!admin || String(email).toLowerCase() !== admin.email || !verifyPassword(String(password || ''), admin.hash)) {
       a.n++;
       if (a.n >= 5) { a.until = Date.now() + 10 * 60e3; a.n = 0; }
-      attempts.set(ip, a);
+      if (attempts.size >= ATTEMPTS_MAX && !attempts.has(key)) attempts.delete(attempts.keys().next().value);
+      attempts.set(key, a);
       throw new HttpError(401, 'E-mail ou senha incorretos');
     }
-    attempts.delete(ip);
+    attempts.delete(key);
     setSession(ctx);
     return { ok: true };
   });

@@ -83,7 +83,23 @@ async function retrying(fn) {
   }
 }
 
-function save(item, buffer, mime) {
+// O tipo vem do conteúdo (não do que o provedor disse): só imagem/vídeo
+// conhecidos são gravados — nada de text/html ou svg servido pelo painel.
+function mediaType(kind, buffer, claimed) {
+  if (kind !== 'video') {
+    const img = sniffImage(buffer);
+    if (!img || !EXT[img]) throw new Error(`o provedor devolveu um arquivo que não é imagem (${claimed || 'tipo desconhecido'})`);
+    return img;
+  }
+  const isMp4 = buffer.length > 12 && buffer.toString('ascii', 4, 8) === 'ftyp';
+  const isWebm = buffer.length > 4 && buffer.readUInt32BE(0) === 0x1a45dfa3;
+  if (isWebm) return 'video/webm';
+  if (isMp4) return claimed === 'video/quicktime' ? 'video/quicktime' : 'video/mp4';
+  throw new Error(`o provedor devolveu um arquivo que não é vídeo (${claimed || 'tipo desconhecido'})`);
+}
+
+function save(item, buffer, claimed) {
+  const mime = mediaType(item.kind, buffer, claimed);
   const dir = path.join(DIR, item.sku.replace(/[^\w.-]+/g, '_'));
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${item.id}.${EXT[mime] || (item.kind === 'video' ? 'mp4' : 'png')}`);

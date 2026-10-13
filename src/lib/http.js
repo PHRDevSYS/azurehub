@@ -29,7 +29,11 @@ function createRouter() {
         const m = pathname.match(r.re);
         if (!m) continue;
         const params = {};
-        r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+        try {
+          r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+        } catch {
+          throw new HttpError(400, 'Endereço inválido');
+        }
         return { handlers: r.handlers, params };
       }
       return null;

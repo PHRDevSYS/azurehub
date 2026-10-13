@@ -127,7 +127,8 @@ function register(r, { requireAdmin }) {
     if (!file) throw new HttpError(404, 'Mídia não encontrada');
     const download = ctx.url.searchParams.get('download') === '1';
     ctx.res.writeHead(200, {
-      'Content-Type': item.mime || 'application/octet-stream',
+      'Content-Type': /^(image\/(png|jpeg|webp|gif)|video\/(mp4|quicktime|webm))$/.test(item.mime || '') ? item.mime : 'application/octet-stream',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
       'Content-Length': fs.statSync(file).size,
       'Cache-Control': 'private, max-age=3600',
       ...(download ? { 'Content-Disposition': `attachment; filename="${item.sku.replace(/[^\w.-]+/g, '_')}-${item.kind}-${item.id}.${file.split('.').pop()}"` } : {}),

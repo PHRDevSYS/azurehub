@@ -333,7 +333,9 @@ EnvironmentFile=/opt/azurehub/.env
 WantedBy=multi-user.target
 ```
 
-Atrás do nginx, publique com `proxy_pass http://127.0.0.1:3900;`.
+Atrás do nginx, publique com `proxy_pass http://127.0.0.1:3900;` e
+`proxy_set_header X-Real-IP $remote_addr;` (o bloqueio de tentativas de login
+usa o IP real do cliente; sem esse cabeçalho, todos aparecem como 127.0.0.1).
 
 ### Variáveis (`.env`)
 
@@ -594,6 +596,17 @@ FROM variacoes v JOIN produtos p ON p.id = v.produto_id
 - A consulta da fonte precisa começar com `SELECT`/`WITH`, mas **use um usuário
   de banco somente-leitura**: essa é a proteção real.
 - OAuth com `state` de uso único (expira em 15 min).
+- **CSRF:** escrita no painel (POST/PUT/DELETE em `/api/`, exceto `/api/v1`)
+  vinda de outro site é recusada (`Sec-Fetch-Site`/`Origin`) e o corpo precisa
+  ser `application/json`.
+- **Fotos e vídeos de produto** não podem apontar para a rede interna (cada
+  redirecionamento é conferido) e o download para ao passar do limite. Se as
+  fotos do ERP ficam na rede local, libere com `MEDIA_ALLOW_PRIVATE=1`.
+- A senha salva da origem só é reaproveitada (campo mascarado) se a conexão
+  (URL, host, usuário, loja…) não mudou.
+- Mídia UGC só é gravada e servida como imagem/vídeo conferidos pelo conteúdo.
+- Bloqueio de login por (IP, e-mail): 5 erros bloqueiam 10 minutos só aquela
+  combinação.
 
 ## Estrutura
 

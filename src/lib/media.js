@@ -3,6 +3,7 @@
 // de origem (Shopee e TikTok exigem upload do arquivo; o Mercado Livre
 // baixa sozinho a partir da URL pública).
 const config = require('../config');
+const { isInternalUrl } = require('./netguard');
 
 class PlatformError extends Error {
   constructor(message, { status, body, retryable = false } = {}) {
@@ -40,23 +41,56 @@ async function requestJson(url, { method = 'GET', headers = {}, body, form, time
   return data;
 }
 
+// Fotos/vídeos de produto vêm de fora (origem, API do site): não podem
+// apontar para a rede interna (SSRF), cada redirecionamento é conferido e o
+// corpo é lido em partes, parando ao passar do limite (sem estourar a memória).
+// MEDIA_ALLOW_PRIVATE=1 libera a rede interna (ex.: ERP com fotos na LAN).
+const MAX_REDIRECTS = 5;
 async function download(url, { kind = 'image', maxBytes = config.maxMediaBytes } = {}) {
+  const signal = AbortSignal.timeout(kind === 'video' ? 300000 : 60000);
+  const limitMsg = `${kind} ${url} passa do limite de ${Math.round(maxBytes / 1048576)} MB`;
+  let current = url;
   let res;
-  try {
-    res = await fetch(url, { signal: AbortSignal.timeout(kind === 'video' ? 300000 : 60000) });
-  } catch (e) {
-    throw new PlatformError(`Não consegui baixar ${kind} ${url}: ${e.message}`, { retryable: true });
+  for (let hop = 0; ; hop++) {
+    let u;
+    try { u = new URL(current); } catch { throw new PlatformError(`URL de ${kind} inválida: ${current}`); }
+    if (!/^https?:$/.test(u.protocol) || u.username || u.password) throw new PlatformError(`URL de ${kind} não permitida: ${u.protocol}//${u.host}`);
+    if (process.env.MEDIA_ALLOW_PRIVATE !== '1' && await isInternalUrl(u)) {
+      throw new PlatformError(`${kind} ${u.host}: endereço da rede interna bloqueado (use MEDIA_ALLOW_PRIVATE=1 se as fotos ficam na rede local)`);
+    }
+    try {
+      res = await fetch(u.href, { signal, redirect: 'manual' });
+    } catch (e) {
+      throw new PlatformError(`Não consegui baixar ${kind} ${url}: ${e.message}`, { retryable: true });
+    }
+    const loc = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    if (!loc) break;
+    if (res.body) await res.body.cancel().catch(() => {});
+    if (hop >= MAX_REDIRECTS) throw new PlatformError(`${kind} ${url}: redirecionamentos demais`);
+    current = new URL(loc, u).href;
   }
   if (!res.ok) throw new PlatformError(`Não consegui baixar ${kind} ${url}: HTTP ${res.status}`, { status: res.status });
   const len = Number(res.headers.get('content-length') || 0);
-  const limitMsg = `${kind} ${url} passa do limite de ${Math.round(maxBytes / 1048576)} MB`;
   if (len > maxBytes) throw new PlatformError(limitMsg);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  if (buffer.length > maxBytes) throw new PlatformError(limitMsg);
+  const chunks = [];
+  let size = 0;
+  if (res.body) {
+    for await (const chunk of res.body) {
+      size += chunk.length;
+      if (size > maxBytes) {
+        res.body.cancel && res.body.cancel().catch(() => {});
+        throw new PlatformError(limitMsg);
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+  }
+  const buffer = Buffer.concat(chunks, size);
   if (!buffer.length) throw new PlatformError(`${kind} ${url} está vazio (0 bytes)`);
   const contentType = (res.headers.get('content-type') || '').split(';')[0] ||
     (kind === 'video' ? 'video/mp4' : 'image/jpeg');
-  const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || `${kind}`) ||
+  let name = new URL(current).pathname.split('/').pop() || '';
+  try { name = decodeURIComponent(name); } catch { /* nome com % inválido: fica como veio */ }
+  name = name ||
     (kind === 'video' ? 'video.mp4' : 'image.jpg');
   return { buffer, contentType, name };
 }

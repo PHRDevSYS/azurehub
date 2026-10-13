@@ -36,7 +36,8 @@ async function call(method, url, body) {
 
 // ------------------------------------------------- provedor simulado
 const seen = { text: [], image: [], video: [], checks: 0 };
-const PNG = Buffer.from('89504e470d0a1a0a', 'hex');
+const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+const MP4 = Buffer.concat([Buffer.from('000000186674797069736f6d', 'hex'), Buffer.from('mp4data')]);
 const fake = providers.register({
   id: 'fake', name: 'IA Simulada', docsUrl: 'https://fake.test/docs', note: 'teste',
   models: { text: ['txt-1'], image: ['img-1'], video: ['vid-1'] }, defaults: { text: 'txt-1', image: 'img-1', video: 'vid-1' },
@@ -49,6 +50,7 @@ const fake = providers.register({
   async image(cfg, { prompt, refs, persona, aspect }) {
     seen.image.push({ model: cfg.models.image, prompt, refs: refs.map((r) => r.url), persona, aspect });
     if (/BLOQUEIA/.test(prompt)) throw new Error('IA Simulada: o pedido foi bloqueado pela política de conteúdo');
+    if (/HTMLFALSO/.test(prompt)) return { buffer: Buffer.from('<html><script>alert(1)</script></html>'), mime: 'text/html' };
     if (/OCUPADO/.test(prompt) && fake.busy-- > 0) throw new AiError('IA Simulada: limite de uso atingido', { status: 429, retryable: true });
     return { buffer: PNG, mime: 'image/png' };
   },
@@ -58,7 +60,7 @@ const fake = providers.register({
   },
   async checkVideo(cfg, job) {
     seen.checks++;
-    return seen.checks % 2 ? { status: 'running' } : { status: 'done', buffer: Buffer.from('mp4data'), mime: 'video/mp4' };
+    return seen.checks % 2 ? { status: 'running' } : { status: 'done', buffer: MP4, mime: 'video/mp4' };
   },
 });
 
@@ -273,7 +275,7 @@ test('gera as 4 mídias: fotos com as fotos reais do produto, vídeo assíncrono
   assert.equal(video.mime, 'video/mp4');
   const file = await call('GET', video.url);
   assert.equal(file.type, 'video/mp4');
-  assert.equal(file.body.toString(), 'mp4data');
+  assert.ok(file.body.equals(MP4));
   const photo = await call('GET', done.find((x) => x.kind === 'uso').url);
   assert.equal(photo.type, 'image/png');
   assert.ok(fs.existsSync(path.join(dir, 'ugc', 'GAR')), 'arquivos em data/ugc/<sku>');
@@ -354,4 +356,13 @@ test('limite de uso do provedor: espera e tenta de novo; foto em formato recusad
   const heic = Object.fromEntries((await untilDone('HEIC')).map((x) => [x.kind, x]));
   assert.equal(heic.uso.status, 'error');
   assert.match(heic.uso.error, /image\/heic, formato que este modelo não aceita/);
+});
+
+test('arquivo devolvido pelo provedor que não é imagem nunca é gravado nem servido como HTML', async () => {
+  await call('POST', '/api/ugc/GAR/generate', { gender: 'feminino', items: [{ kind: 'especificacoes', prompt: 'HTMLFALSO: arte com especificações da garrafa térmica.' }] });
+  const now = Object.fromEntries((await untilDone('GAR')).map((x) => [x.kind, x]));
+  assert.equal(now.especificacoes.status, 'error');
+  assert.match(now.especificacoes.error, /não é imagem \(text\/html\)/);
+  const media = await call('GET', now.especificacoes.previous.url);
+  assert.equal(media.type, 'image/png');
 });

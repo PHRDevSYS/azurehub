@@ -29,13 +29,19 @@ function saveSource(cfg) {
 }
 
 // Valida e limpa os campos conforme o conector; senha mascarada = manter a salva.
+// Campos que identificam PARA ONDE vai a senha: mudou algum, a senha salva
+// não é reaproveitada (senão uma sessão do painel enviaria o segredo a outro host).
+const CONNECTION = /^(url|host|port|user|database|engine|shop|store_id|app_id|client_id|consumer_key)$/;
+
 function cleanSource(body) {
   const c = connectors.get(body && body.type);
   const prev = getSource() || {};
+  const sameTarget = prev.type === c.id && c.fields.filter((f) => CONNECTION.test(f.key))
+    .every((f) => String(body[f.key] ?? f.default ?? '').trim() === String(prev[f.key] ?? f.default ?? '').trim());
   const out = { type: c.id };
   for (const f of c.fields) {
     let v = body[f.key];
-    if (f.type === 'password' && (v === undefined || String(v).startsWith('••••••'))) v = prev.type === c.id ? prev[f.key] : undefined;
+    if (f.type === 'password' && (v === undefined || String(v).startsWith('••••••'))) v = sameTarget ? prev[f.key] : undefined;
     if (f.type === 'checkbox') v = v === undefined ? (f.default ?? false) : !!v;
     else v = v === undefined || v === null ? (f.default ?? '') : String(v).trim();
     const visible = !f.showIf || Object.entries(f.showIf).every(([k, vals]) => vals.includes(body[k] ?? (c.fields.find((x) => x.key === k) || {}).default));
