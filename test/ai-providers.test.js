@@ -346,6 +346,22 @@ test('OpenRouter: vídeo com duração ajustada ao modelo, consulta e download s
   await assert.rejects(openrouter.startVideo(wide, { prompt: 'x', refs: [ref(1)], seconds: 8, aspect: '9:16' }), /não gera vídeo 9:16/);
 });
 
+test('xAI/Google: vídeo expirado, 404 e erro em array viram mensagens claras; timeout de geração não repete', async () => {
+  reply(200, { status: 'expired' });
+  assert.match((await xai.checkVideo(cfgOf(xai), 'j')).error, /expirou/);
+  reply(404, { error: 'not found' });
+  assert.match((await xai.checkVideo(cfgOf(xai), 'j')).error, /não existe mais/);
+  reply(200, { video: { url: 'https://vidgen.x.ai/a.mp4', respect_moderation: true } });
+  reply(200, Buffer.from('mp4'), { 'Content-Type': 'video/mp4' });
+  assert.equal((await xai.checkVideo(cfgOf(xai), 'j')).status, 'done', 'sem status mas com url = pronto');
+  assert.equal(xai.models.video.includes('grok-imagine-video-1.5-lite'), false);
+  reply(400, [{ error: { code: 400, message: 'API key not valid. Please pass a valid API key.', status: 'INVALID_ARGUMENT', details: [{ reason: 'API_KEY_INVALID' }] } }]);
+  await assert.rejects(google.test(cfgOf(google)), /chave de API inválida/);
+  reply(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Resource has been exhausted (e.g. check quota).' } });
+  await assert.rejects(google.writeJson(cfgOf(google), { system: 's', user: 'u' }), (e) => /limite de uso/.test(e.message) && e.retryable, 'rate limit não é falta de crédito');
+  assert.equal(google.maxVideoSeconds(), 10);
+});
+
 test('tipo real da foto pelos primeiros bytes', () => {
   assert.equal(sniffImage(JPG), 'image/jpeg');
   assert.equal(sniffImage(PNG), 'image/png');

@@ -69,7 +69,7 @@ function register(r, { requireAdmin }) {
     if (!GENDERS.includes(gender)) throw new Error('Escolha o gênero do(a) influencer: feminino ou masculino');
     // Sem modelo de texto escolhido, o agente usa os prompts-padrão.
     const { provider, cfg } = writer();
-    const plan = await agent.planPrompts(provider, cfg, prod.data, gender, { videoSeconds: ai.options('midia').videoSeconds });
+    const plan = await agent.planPrompts(provider, cfg, prod.data, gender, { videoSeconds: ai.videoSeconds() });
     for (const k of agent.KINDS) store.ugcInsert({ sku: prod.sku, kind: k, gender, prompt: plan.prompts[k], status: 'draft' });
     return { by: plan.by, note: plan.note, items: itemsOf(prod.sku) };
   }));
@@ -108,7 +108,7 @@ function register(r, { requireAdmin }) {
           let prompts = latest;
           if (agent.KINDS.some((k) => !latest[k])) {
             const { provider, cfg } = writer();
-            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: ai.options('midia').videoSeconds })).prompts, ...latest };
+            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: ai.videoSeconds() })).prompts, ...latest };
           }
           runner.generate({ sku, gender, items: agent.KINDS.map((kind) => ({ kind, prompt: prompts[kind] })) });
         } catch (e) {

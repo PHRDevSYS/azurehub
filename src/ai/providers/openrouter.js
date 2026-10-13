@@ -85,6 +85,7 @@ module.exports = {
   recommended: { text: ['meta-llama/llama-3.3-70b-instruct', 'meta-llama/llama-3.1-8b-instruct', 'qwen/qwen3-14b'] },
   defaults: { text: 'meta-llama/llama-3.3-70b-instruct', image: 'google/gemini-nano-banana-2.1', video: 'x-ai/grok-imagine-video-1.5' },
   acceptMimes: COMMON_MIMES,
+  maxVideoSeconds: () => 15,
   fields: [
     { key: 'sort', label: 'Escolha do fornecedor', type: 'select', help: 'O OpenRouter manda cada pedido ao fornecedor do modelo conforme este critério',
       options: [['price', 'Mais barato (recomendado)'], ['throughput', 'Mais rápido (vazão)'], ['latency', 'Menor latência']] },

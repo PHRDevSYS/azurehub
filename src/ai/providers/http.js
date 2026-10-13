@@ -11,19 +11,22 @@ class AiError extends Error {
 }
 
 // Falta de crédito/limite de gasto: tentar de novo não resolve.
-const BILLING = /insufficient_quota|credit|billing|payment|exhausted|spend_limit|usage_limit_exceeded|insufficient balance/i;
+const BILLING = /insufficient_quota|payment_required|credit balance|insufficient credits|insufficient balance|spend_limit|usage_limit_exceeded|enable billing|billing (is )?(disabled|not enabled)|credit_balance|credits? (are |is )?(exhausted|depleted)/i;
 
 // Erro HTTP do provedor → mensagem em português (o código do provedor vai
 // junto, entre parênteses, para quem precisar abrir chamado).
 function explain(provider, status, data) {
+  // Alguns endpoints (Google /interactions) devolvem os erros como array.
+  if (Array.isArray(data)) data = data.find((x) => x && x.error) || data[0] || {};
   const err = (data && (data.error || data)) || {};
   const raw = typeof err === 'string' ? err : err.message || data.message || data.detail || JSON.stringify(data).slice(0, 300);
   const msg = String(Array.isArray(raw) ? raw.map((x) => x.msg || x.message || JSON.stringify(x)).join('; ') : raw).slice(0, 400);
-  const code = typeof err === 'object' ? [err.code, err.type, err.status].filter((x) => typeof x === 'string').join(' ') : '';
+  const code = typeof err === 'object' ? [err.code, err.type, err.status, ...((err.details || []).map((d) => d && d.reason))].filter((x) => typeof x === 'string').join(' ') : '';
   const all = `${code} ${msg}`;
   if (status === 401 || /api[ _-]?key (not valid|invalid)|incorrect api key|api_key_invalid|authentication/i.test(all)) return `${provider}: chave de API inválida (${msg})`;
   if (status === 403 && /country|region|territory/i.test(all)) return `${provider}: a API não atende a região de onde o servidor está acessando (${msg})`;
   if (status === 403) return `${provider}: a chave não tem permissão para este modelo ou recurso (${msg})`;
+  if (status === 429 && /per ?day|perday|daily/i.test(all) && !BILLING.test(all)) return `${provider}: cota diária do modelo esgotada; renova no próximo dia (${msg})`;
   if (status === 402 || BILLING.test(all)) return `${provider}: sem créditos ou faturamento desativado na conta do provedor (${msg})`;
   if (status === 404) return `${provider}: modelo ou recurso não encontrado — confira o id do modelo (${msg})`;
   if (status === 429) return `${provider}: limite de uso atingido; tente de novo em alguns minutos (${msg})`;
@@ -43,7 +46,10 @@ async function request(provider, url, { method = 'GET', headers = {}, json, form
   try {
     res = await fetch(url, init);
   } catch (e) {
-    throw new AiError(`${provider}: falha de rede (${e.message})`, { retryable: true });
+    // Estouro do tempo-limite do cliente: o pedido pode ter sido aceito (e
+    // cobrado). Repetir um POST de geração geraria uma segunda cobrança.
+    const timedOut = e && e.name === 'TimeoutError';
+    throw new AiError(timedOut ? `${provider}: o provedor não respondeu em ${Math.round(timeoutMs / 1000)} s` : `${provider}: falha de rede (${e.message})`, { retryable: !timedOut || method === 'GET' });
   }
   if (raw && res.ok) {
     return { buffer: Buffer.from(await res.arrayBuffer()), mime: (res.headers.get('content-type') || '').split(';')[0] };
@@ -52,7 +58,7 @@ async function request(provider, url, { method = 'GET', headers = {}, json, form
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text.slice(0, 300) }; }
   if (!res.ok) {
-    const transient = (res.status === 429 && !BILLING.test(text)) || res.status >= 500;
+    const transient = (res.status === 429 && !BILLING.test(text)) || res.status === 408 || res.status >= 500;
     throw new AiError(explain(provider, res.status, data), { status: res.status, retryable: transient, retryAfter: Number(res.headers.get('retry-after')) || null });
   }
   return data;

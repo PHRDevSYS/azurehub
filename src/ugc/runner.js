@@ -139,7 +139,7 @@ async function work(id) {
   if (!job) {
     store.ugcUpdate(id, { status: 'running' });
     const { refs, prompt, persona: hasPersona } = await inputs();
-    const out = await retrying(() => provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.options('midia').videoSeconds, aspect: '9:16' }));
+    const out = await retrying(() => provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.videoSeconds(), aspect: '9:16' }));
     if (out.buffer) { save(item, out.buffer, out.mime || 'video/mp4'); return; } // provedor que responde na hora
     job = out.job;
     store.ugcUpdate(id, { job: String(job) });

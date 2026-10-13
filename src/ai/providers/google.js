@@ -28,9 +28,11 @@ function output(it, type) {
 
 function failure(it) {
   const errs = [...(it.errors || []), ...((it.steps || []).map((s) => s.error).filter(Boolean))];
-  const msg = errs.map((e) => e.message || e.code).filter(Boolean).join('; ');
-  if (it.status === 'budget_exceeded') return `${NAME}: limite de gastos do projeto atingido`;
-  if (/safety|prohibited|blocklist|spii|recitation|content_blocked/i.test(msg)) return `${NAME}: o pedido foi bloqueado pela política de conteúdo — ajuste o prompt (${msg})`;
+  const msg = errs.map((e) => [e.code, e.message].filter(Boolean).join(': ')).filter(Boolean).join('; ');
+  if (it.status === 'budget_exceeded' || it.status === 'incomplete') return `${NAME}: a geração parou no limite de tokens ou de execução`;
+  if (/\blanguage\b/i.test(msg)) return `${NAME}: o modelo recusou o idioma — descreva a cena em inglês e deixe só a fala em português entre aspas (${msg})`;
+  if (/no_image/i.test(msg)) return `${NAME}: o modelo não conseguiu gerar a imagem (${msg})`;
+  if (/safety|prohibited|blocklist|spii|recitation|content_blocked|image_other/i.test(msg)) return `${NAME}: o pedido foi bloqueado pela política de conteúdo — ajuste o prompt (${msg})`;
   return `${NAME}: a geração terminou como "${it.status}"${msg ? ` (${msg})` : ''}`;
 }
 
@@ -38,7 +40,7 @@ async function media(cfg, block, kind) {
   if (block.data) return fromBase64(block.data, block.mime_type || (kind === 'video' ? 'video/mp4' : 'image/jpeg'));
   if (block.uri) {
     const url = new URL(block.uri);
-    if (url.hostname !== 'generativelanguage.googleapis.com') throw new AiError(`${NAME}: endereço de download inesperado`);
+    if (url.protocol !== 'https:' || url.hostname !== 'generativelanguage.googleapis.com') throw new AiError(`${NAME}: endereço de download inesperado`);
     const f = await request(NAME, block.uri, { headers: headers(cfg), raw: true, timeoutMs: 300000 });
     return { buffer: f.buffer, mime: block.mime_type || f.mime || 'video/mp4' };
   }
@@ -51,16 +53,17 @@ module.exports = {
   docsUrl: 'https://aistudio.google.com/apikey',
   note: 'Fotos com Nano Banana e vídeo falado com Gemini Omni (áudio nativo, até 10 s). Exige projeto com faturamento.',
   models: {
-    text: ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest'],
+    text: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest'],
     image: ['gemini-nano-banana-2.1', 'gemini-3-pro-image', 'gemini-3.1-flash-lite-image'],
     video: ['gemini-omni-1.1-flash'],
   },
   defaults: { text: 'gemini-3.6-flash', image: 'gemini-nano-banana-2.1', video: 'gemini-omni-1.1-flash' },
   acceptMimes: IMAGE_MIMES,
+  maxVideoSeconds: () => 10,
   fields: [
     { key: 'imageSize', label: 'Tamanho das fotos', type: 'select', options: [['1K', '1K (928×1152)'], ['2K', '2K (1856×2304)']] },
-    { key: 'resolution', label: 'Resolução do vídeo', type: 'select', help: '1080p sai mais caro e demora mais',
-      options: [['720p', '720p (recomendada)'], ['1080p', '1080p'], ['360p', '360p (rascunho rápido)']] },
+    { key: 'resolution', label: 'Resolução do vídeo', type: 'select', help: 'Acima de 720p o vídeo é grande demais para vir embutido na resposta',
+      options: [['720p', '720p (recomendada)'], ['360p', '360p (rascunho rápido)']] },
   ],
 
   async test(cfg) {
@@ -78,6 +81,7 @@ module.exports = {
       method: 'POST', headers: headers(cfg), timeoutMs: 180000,
       json: { model: cfg.models.text, system_instruction: system, input: user, response_format: { type: 'text', mime_type: 'application/json' }, store: false },
     });
+    if (it.status === 'incomplete') throw new AiError(`${NAME}: a resposta foi cortada pelo limite de tokens`);
     const text = output(it, 'text');
     if (!text) throw new AiError(FAILED.includes(it.status) ? failure(it) : `${NAME}: o agente não respondeu`);
     return parseJsonText(text.text);
@@ -89,7 +93,7 @@ module.exports = {
       json: {
         model: cfg.models.image,
         input: [{ type: 'text', text: prompt }, ...refs.slice(0, 14).map(asImage)],
-        response_format: { type: 'image', aspect_ratio: aspect, image_size: cfg.extra.imageSize || '1K' },
+        response_format: { type: 'image', aspect_ratio: aspect, image_size: /flash-lite-image/.test(cfg.models.image || '') ? '1K' : (cfg.extra.imageSize || '1K') },
         store: false,
       },
     });
@@ -111,7 +115,7 @@ module.exports = {
     try {
       it = await request(NAME, `${BASE}/interactions`, { method: 'POST', headers: headers(cfg), timeoutMs: 120000, json: { ...body, background: true } });
     } catch (e) {
-      if (!(e.status === 400 && /background/i.test(e.message))) throw e;
+      if (!((e.status === 400 || e.status === 501) && /background|unimplemented|parameter_unknown/i.test(e.message))) throw e;
       it = await request(NAME, `${BASE}/interactions`, { method: 'POST', headers: headers(cfg), timeoutMs: 15 * 60e3, json: { ...body, store: false } });
       const vid = output(it, 'video');
       if (!vid) throw new AiError(FAILED.includes(it.status) ? failure(it) : `${NAME}: o vídeo terminou sem arquivo`);
@@ -123,11 +127,20 @@ module.exports = {
   },
 
   async checkVideo(cfg, job) {
-    const it = await request(NAME, `${BASE}/interactions/${encodeURIComponent(job)}`, { headers: headers(cfg), timeoutMs: 300000 });
+    let it;
+    try {
+      it = await request(NAME, `${BASE}/interactions/${encodeURIComponent(job)}`, { headers: headers(cfg), timeoutMs: 300000 });
+    } catch (e) {
+      if (e.status === 404) return { status: 'error', error: `${NAME}: o pedido de vídeo não existe mais no Google (expirou ou foi apagado); gere de novo` };
+      throw e;
+    }
     if (it.status === 'completed') {
       const vid = output(it, 'video');
       if (!vid) return { status: 'error', error: `${NAME}: o vídeo terminou sem arquivo` };
-      return { status: 'done', ...(await media(cfg, vid, 'video')) };
+      const out = await media(cfg, vid, 'video');
+      // O vídeo em segundo plano fica guardado no projeto do usuário: apaga depois de baixar.
+      request(NAME, `${BASE}/interactions/${encodeURIComponent(job)}`, { method: 'DELETE', headers: headers(cfg), timeoutMs: 20000 }).catch(() => {});
+      return { status: 'done', ...out };
     }
     if (FAILED.includes(it.status)) return { status: 'error', error: failure(it) };
     return { status: 'running' };

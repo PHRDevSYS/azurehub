@@ -153,6 +153,15 @@ function resolve(agentId, slotKey, { optional = false } = {}) {
 
 const options = (agentId) => optionsOf(agents.get(agentId), get());
 
+// Duração do vídeo da mídia UGC, limitada ao máximo do modelo escolhido
+// (o roteiro de fala é escrito para esta duração).
+function videoSeconds() {
+  const secs = options('midia').videoSeconds;
+  const r = resolve('midia', 'video', { optional: true });
+  const max = r && r.provider.maxVideoSeconds ? r.provider.maxVideoSeconds(r.model) : null;
+  return max ? Math.min(secs, max) : secs;
+}
+
 // Modelos que os agentes usam de um provedor (o teste de conexão confere se a
 // chave enxerga cada um).
 function modelsInUse(pid) {
@@ -167,4 +176,4 @@ function modelsInUse(pid) {
   return out;
 }
 
-module.exports = { get, summary, saveProvider, saveAgent, connection, resolve, options, modelsInUse, keyName };
+module.exports = { get, summary, saveProvider, saveAgent, connection, resolve, options, videoSeconds, modelsInUse, keyName };
