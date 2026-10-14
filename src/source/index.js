@@ -120,10 +120,12 @@ function ingest(rawProducts, origin, opts = {}) {
 }
 
 function ingestRows(rawProducts, origin, { sendTo = [] } = {}) {
+  const seen = new Set();
   const out = { received: rawProducts.length, changed: 0, unchanged: 0, invalid: [], queued: 0 };
   const enabled = require('../platforms').ids().filter(store.isEnabled);
   for (const raw of rawProducts) {
     const p = normalizeProduct(raw);
+    if (p.sku) seen.add(p.sku);
     // Inativo que o hub nunca viu não entra (a origem traz inativos só para
     // pausar os anúncios de quem já estava aqui).
     if (p.active === false && p.sku && !store.getProduct(p.sku)) { out.unchanged++; continue; }
@@ -138,6 +140,7 @@ function ingestRows(rawProducts, origin, { sendTo = [] } = {}) {
     for (const platform of sendTo) store.selectForPlatform(platform, p.sku);
     out.queued += enqueueListings(p.sku, enabled, (platform) => changed || sendTo.includes(platform));
   }
+  Object.defineProperty(out, 'seen', { value: seen }); // SKUs da captura (não vai no JSON)
   return out;
 }
 
@@ -156,9 +159,9 @@ function enqueueListings(sku, enabled, when = () => true) {
 // os conectores só trazem os ativos) vira inativo com estoque 0, e os
 // anúncios vão para a fila (pausar/zerar). Captura vazia não desativa nada:
 // pode ser falha da origem, não uma loja sem produtos.
-function deactivateMissing(origin, rows) {
+function deactivateMissing(origin, rows, seenSkus) {
   if (!rows.length) return 0;
-  const seen = new Set(rows.map((r) => normalizeProduct(r).sku));
+  const seen = seenSkus || new Set(rows.map((r) => normalizeProduct(r).sku));
   const enabled = require('../platforms').ids().filter(store.isEnabled);
   let n = 0;
   for (const sku of store.skusByOrigin(origin)) {
@@ -185,7 +188,7 @@ async function importFromSource() {
     try {
       const rows = await c.fetchProducts(cfg, await tokens(cfg));
       const result = ingest(rows, c.id);
-      result.deactivated = deactivateMissing(c.id, rows);
+      result.deactivated = deactivateMissing(c.id, rows, result.seen);
       store.setSetting('last_capture', { at: store.now(), startedAt: started, origin: c.id, ...result, invalid: result.invalid.length, invalidList: result.invalid.slice(0, 50) });
       store.log('info', `Captura (${c.name}): ${result.received} lidos, ${result.changed} novos/alterados, ${result.invalid.length} inválidos, ${result.queued} na fila${result.deactivated ? `, ${result.deactivated} inativado(s) por não virem mais da origem` : ''}`);
       return result;

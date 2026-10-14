@@ -127,6 +127,12 @@ function migrate() {
   }
   if (!cols('listings').includes('selected_at')) db.exec('ALTER TABLE listings ADD COLUMN selected_at TEXT');
   if (!cols('products').includes('sync_hash')) db.exec('ALTER TABLE products ADD COLUMN sync_hash TEXT');
+  // Título e marca em colunas: a busca não precisa interpretar o JSON de cada produto.
+  if (!cols('products').includes('title')) {
+    db.exec('ALTER TABLE products ADD COLUMN title TEXT');
+    db.exec('ALTER TABLE products ADD COLUMN brand TEXT');
+    db.exec(`UPDATE products SET title = json_extract(data, '$.title'), brand = json_extract(data, '$.brand')`);
+  }
 }
 
 // Hash do que vai para os marketplaces: conteúdo do produto + preço de venda
@@ -237,10 +243,10 @@ function upsertProduct(product, hash, origin) {
   // Mesmo hash e mesmos dados = nada a fazer. Só o custo mudou: grava, sem reenvio.
   if (prev && prev.hash === hash && prev.data === JSON.stringify(product)) return false;
   const t = now();
-  run(`INSERT INTO products(sku, data, hash, origin, updated_at, captured_at) VALUES(?, ?, ?, ?, ?, ?)
+  run(`INSERT INTO products(sku, data, hash, origin, updated_at, captured_at, title, brand) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(sku) DO UPDATE SET data = excluded.data, hash = excluded.hash,
-       origin = excluded.origin, updated_at = excluded.updated_at`,
-    product.sku, JSON.stringify(product), hash, origin, t, t);
+       origin = excluded.origin, updated_at = excluded.updated_at, title = excluded.title, brand = excluded.brand`,
+    product.sku, JSON.stringify(product), hash, origin, t, t, product.title || null, product.brand || null);
   refreshSyncHash(product.sku);
   return true;
 }
@@ -267,12 +273,13 @@ function listingsBySku(skus) {
 // Grade da tela Produtos (sem mídia). filter: all | not_sent | sent | error
 function listProducts({ limit = 50, offset = 0, search = '', filter = 'all' } = {}) {
   const like = `%${search}%`;
-  const where = [`(sku LIKE ? OR json_extract(data, '$.title') LIKE ? OR json_extract(data, '$.brand') LIKE ?)`];
-  const args = [like, like, like];
+  const where = [];
+  const args = [];
+  if (search) { where.push(`(sku LIKE ? OR title LIKE ? OR brand LIKE ?)`); args.push(like, like, like); }
   if (filter === 'not_sent') where.push('sku NOT IN (SELECT sku FROM listings)');
   if (filter === 'sent') where.push('sku IN (SELECT sku FROM listings)');
   if (filter === 'error') where.push(`sku IN (SELECT sku FROM listings WHERE status = 'error')`);
-  const w = where.join(' AND ');
+  const w = where.join(' AND ') || '1';
   const rows = all(`SELECT sku, data, hash, sync_hash, origin, updated_at, captured_at FROM products WHERE ${w}
     ORDER BY updated_at DESC LIMIT ? OFFSET ?`, ...args, limit, offset);
   const total = get(`SELECT COUNT(*) AS n FROM products WHERE ${w}`, ...args).n;
@@ -295,13 +302,14 @@ function listProducts({ limit = 50, offset = 0, search = '', filter = 'all' } = 
 // Grade da tela Sincronização: uma linha por produto × destino selecionado.
 function listSync({ limit = 100, offset = 0, search = '', platform = '', status = '' } = {}) {
   const like = `%${search}%`;
-  const where = [`(l.sku LIKE ? OR json_extract(p.data, '$.title') LIKE ? OR IFNULL(l.external_id, '') LIKE ?)`];
-  const args = [like, like, like];
+  const where = [];
+  const args = [];
+  if (search) { where.push(`(l.sku LIKE ? OR p.title LIKE ? OR IFNULL(l.external_id, '') LIKE ?)`); args.push(like, like, like); }
   if (platform) { where.push('l.platform = ?'); args.push(platform); }
   // Desatualizado = já publicado, mas o produto mudou na origem desde o último envio.
   if (status === 'outdated') where.push(`l.status = 'synced' AND (l.last_hash IS NULL OR l.last_hash != COALESCE(p.sync_hash, p.hash))`);
   else if (status) { where.push('l.status = ?'); args.push(status); }
-  const w = where.join(' AND ');
+  const w = where.join(' AND ') || '1';
   const rows = all(`SELECT l.*, p.data, COALESCE(p.sync_hash, p.hash) AS hash, p.updated_at AS product_updated_at,
       (SELECT j.status || '|' || j.run_after FROM jobs j WHERE j.platform = l.platform AND j.sku = l.sku AND j.status IN ('queued','running') ORDER BY j.id DESC LIMIT 1) AS job
     FROM listings l JOIN products p ON p.sku = l.sku WHERE ${w}

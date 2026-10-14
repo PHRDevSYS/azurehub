@@ -222,3 +222,38 @@ test('motor: parada durante o envio, preço recusado e fim de promoção', async
     ml.publish = original;
   }
 });
+
+test('motor: até 2 jobs por plataforma ao mesmo tempo, nunca do mesmo produto', async () => {
+  const ml = require('../src/platforms').REGISTRY.mercadolivre;
+  const original = ml.publish;
+  const pforms = require('../src/platforms');
+  const ctxOrig = pforms.context;
+  let now = 0; let peak = 0; const seen = [];
+  try {
+    store.setEnabled('mercadolivre', true);
+    store.open().prepare(`DELETE FROM jobs`).run();
+    for (const sku of ['C1', 'C2', 'C3', 'C4']) {
+      store.upsertProduct({ sku, title: sku, price: 10, stock: 1, images: [], videos: [], variants: [], active: true }, `h-${sku}`, 'api');
+      store.selectForPlatform('mercadolivre', sku);
+      store.enqueue('mercadolivre', sku);
+    }
+    pforms.context = async () => ({ platform: ml, creds: {}, tokens: {} });
+    ml.publish = async (c, p) => {
+      now++; peak = Math.max(peak, now); seen.push(p.sku);
+      await new Promise((ok) => setTimeout(ok, 30));
+      now--;
+      return { externalId: `X-${p.sku}`, meta: {}, warnings: [] };
+    };
+    engine.tick();
+    await new Promise((ok) => setTimeout(ok, 15));
+    assert.equal(peak, 2, 'dois em paralelo');
+    await new Promise((ok) => setTimeout(ok, 60));
+    engine.tick();
+    await new Promise((ok) => setTimeout(ok, 80));
+    assert.equal(new Set(seen).size, 4, 'todos processados');
+    assert.ok(peak <= 2);
+  } finally {
+    ml.publish = original;
+    pforms.context = ctxOrig;
+  }
+});

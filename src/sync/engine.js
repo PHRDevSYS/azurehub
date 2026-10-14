@@ -8,7 +8,10 @@ const config = require('../config');
 const pricing = require('../pricing');
 
 const MAX_ATTEMPTS = 5;
-const busy = new Set();
+// Jobs em andamento por plataforma (sku de cada um): até CONCURRENCY ao mesmo
+// tempo, nunca dois do mesmo produto.
+const CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.SYNC_CONCURRENCY) || 2));
+const busy = new Map();
 let timer = null;
 let autoImportTimer = null;
 
@@ -85,19 +88,24 @@ let lastPrune = 0;
 function tick() {
   if (Date.now() - lastPrune > 3600e3) { lastPrune = Date.now(); try { store.pruneJobs(); } catch { /* tenta na próxima hora */ } }
   for (const platform of platforms.ids()) {
-    if (busy.has(platform) || !store.isEnabled(platform)) continue;
-    const job = nextFor(platform);
-    if (!job) continue;
-    busy.add(platform);
-    processJob(job).finally(() => busy.delete(platform));
+    if (!store.isEnabled(platform)) continue;
+    const running = busy.get(platform) || new Set();
+    busy.set(platform, running);
+    while (running.size < CONCURRENCY) {
+      const job = nextFor(platform, [...running]);
+      if (!job) break;
+      running.add(job.sku);
+      processJob(job).finally(() => running.delete(job.sku));
+    }
   }
 }
 
-function nextFor(platform) {
+function nextFor(platform, skipSkus = []) {
   // nextJob() pega o próximo de qualquer plataforma; filtramos por ela aqui.
   const db = store.open();
-  const job = db.prepare(`SELECT * FROM jobs WHERE status = 'queued' AND platform = ? AND run_after <= ? ORDER BY id LIMIT 1`)
-    .get(platform, store.now());
+  const skip = skipSkus.length ? ` AND sku NOT IN (${skipSkus.map(() => '?').join(',')})` : '';
+  const job = db.prepare(`SELECT * FROM jobs WHERE status = 'queued' AND platform = ? AND run_after <= ?${skip} ORDER BY id LIMIT 1`)
+    .get(platform, store.now(), ...skipSkus);
   if (!job) return null;
   db.prepare(`UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?`).run(store.now(), job.id);
   return { ...job, attempts: job.attempts + 1 };
