@@ -194,7 +194,7 @@ test('Bling: OAuth com Basic, lista + detalhe, variações "Cor:Azul;Tamanho:P",
 
   const rows = await bling.fetchProducts(cfg, tokens);
   const list = calls.find((c) => c.url.pathname.endsWith('/produtos'));
-  assert.equal(list.url.searchParams.get('criterio'), '2', 'só ativos');
+  assert.equal(list.url.searchParams.get('criterio'), '5', 'ativos e inativos: o inativo pausa o anúncio');
   assert.equal(list.headers.Authorization, 'Bearer AT');
   assert.ok(!calls.some((c) => c.url.pathname.endsWith('/produtos/2')), 'variação listada solta não é buscada de novo');
   const [cam, gar] = rows.map(normalizeProduct);

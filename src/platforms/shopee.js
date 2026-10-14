@@ -24,6 +24,7 @@
 // - Vídeo: MP4 até 30 MB, 10–60 s, ≤ 1280×1280, enviado em partes de 4 MB.
 // - Desconto: início ≥ 1 h no futuro, fim ≥ 1 h após o início, duração < 180 dias.
 //   Com promoção ativa, o preço original não pode ser alterado.
+const { stableUrl } = require('../source/normalize');
 const { requestJson, download, PlatformError } = require('../lib/media');
 const { hmacHex, md5, sha256 } = require('../lib/crypto');
 const H_ = require('./preview-helpers');
@@ -319,7 +320,7 @@ async function prepare(ctx, p, prev, warnings) {
 
   // Fotos (máx. 10 MB, JPG/PNG). Cache por URL evita reenvio.
   const imageCache = { ...(prev.images || {}) };
-  const up = dry ? async (u) => `(foto) ${u}` : async (u) => (imageCache[u] ||= await uploadImage(ctx, u));
+  const up = dry ? async (u) => `(foto) ${u}` : async (u) => (imageCache[stableUrl(u)] ||= await uploadImage(ctx, u));
   const imageIds = [];
   for (const u of p.images.slice(0, 9)) imageIds.push(await up(u));
   if (p.images.length > 9) warnings.push('Shopee aceita até 9 fotos; as excedentes foram ignoradas');

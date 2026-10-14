@@ -35,9 +35,12 @@ function stockOf(item, cfg) {
   return item.stock_status === 'instock' || item.stock_status === 'onbackorder' ? Number(cfg.unmanaged_stock || 0) : 0;
 }
 
+// Os campos *_gmt do WooCommerce vêm sem fuso ("2026-11-12T01:02:16"): são UTC.
+const gmt = (v) => (v && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(v) ? `${v}Z` : v || null);
+
 function promo(item) {
   const sale = item.sale_price !== '' && item.sale_price !== null && item.sale_price !== undefined ? item.sale_price : null;
-  return { promoPrice: sale, promoStart: item.date_on_sale_from_gmt || item.date_on_sale_from || null, promoEnd: item.date_on_sale_to_gmt || item.date_on_sale_to || null };
+  return { promoPrice: sale, promoStart: gmt(item.date_on_sale_from_gmt) || item.date_on_sale_from || null, promoEnd: gmt(item.date_on_sale_to_gmt) || item.date_on_sale_to || null };
 }
 
 function mapProduct(p, variations, cfg) {
@@ -67,7 +70,9 @@ function mapProduct(p, variations, cfg) {
       sku: v.sku || `WOO-${p.id}-${v.id}`,
       options: Object.fromEntries((v.attributes || []).map((a) => [a.name, a.option])),
       price: v.regular_price || v.price,
-      promoPrice: promo(v).promoPrice,
+      // A variação não leva datas próprias: promoção agendada para o futuro
+      // (on_sale = false) só entra quando o WooCommerce disser que começou.
+      promoPrice: v.on_sale === false ? null : promo(v).promoPrice,
       stock: stockOf(v, cfg),
       gtin: v.global_unique_id || null,
       images: v.image && v.image.src ? [v.image.src] : [],

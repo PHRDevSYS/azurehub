@@ -21,6 +21,7 @@
 //   Foto por valor de UM só tipo (aqui, o 1º: ex. uma foto por cor), enviada
 //   com use_case ATTRIBUTE_IMAGE. Em Edit/Partial Edit, SKU omitida é APAGADA
 //   e SKU sem id é criada; preço e estoque omitidos ficam como estão.
+const { stableUrl } = require('../source/normalize');
 const { requestJson, download, PlatformError } = require('../lib/media');
 const { hmacHex, sha256 } = require('../lib/crypto');
 const H_ = require('./preview-helpers');
@@ -305,7 +306,7 @@ async function attributeImages(ctx, p, axis, prev) {
     const v = p.variants.find((x) => x.options[axis.key] === value && x.images.length);
     const url = v ? v.images[0] : p.images[0];
     const old = (prev || {})[value];
-    out[value] = old && old.url === url ? old : { url, uri: await uploadImage(ctx, url, 'ATTRIBUTE_IMAGE') };
+    out[value] = old && stableUrl(old.url) === stableUrl(url) ? old : { url, uri: await uploadImage(ctx, url, 'ATTRIBUTE_IMAGE') };
   }
   return out;
 }
@@ -614,8 +615,9 @@ async function uploadMedia(ctx, p, prev, warnings) {
   const imageCache = { ...(prev.images || {}) };
   const mainImages = [];
   for (const url of p.images.slice(0, 9)) {
-    if (!imageCache[url]) imageCache[url] = await uploadImage(ctx, url);
-    mainImages.push({ uri: imageCache[url] });
+    const key = stableUrl(url);
+    if (!imageCache[key]) imageCache[key] = await uploadImage(ctx, url);
+    mainImages.push({ uri: imageCache[key] });
   }
   if (p.images.length > 9) warnings.push('TikTok Shop aceita até 9 fotos principais; as excedentes foram ignoradas');
 

@@ -119,6 +119,9 @@ function ingest(rawProducts, origin, { sendTo = [] } = {}) {
   const enabled = require('../platforms').ids().filter(store.isEnabled);
   for (const raw of rawProducts) {
     const p = normalizeProduct(raw);
+    // Inativo que o hub nunca viu não entra (a origem traz inativos só para
+    // pausar os anúncios de quem já estava aqui).
+    if (p.active === false && p.sku && !store.getProduct(p.sku)) { out.unchanged++; continue; }
     const errors = validateProduct(p);
     if (errors.length) {
       out.invalid.push({ sku: p.sku || null, title: p.title || null, errors });
@@ -128,16 +131,40 @@ function ingest(rawProducts, origin, { sendTo = [] } = {}) {
     if (changed) out.changed++;
     else out.unchanged++;
     for (const platform of sendTo) store.selectForPlatform(platform, p.sku);
-    for (const platform of enabled) {
-      const l = store.getListing(platform, p.sku);
-      if (!l || l.status === 'paused') continue;
-      if (changed || sendTo.includes(platform)) {
-        store.enqueue(platform, p.sku);
-        out.queued++;
-      }
-    }
+    out.queued += enqueueListings(p.sku, enabled, (platform) => changed || sendTo.includes(platform));
   }
   return out;
+}
+
+function enqueueListings(sku, enabled, when = () => true) {
+  let n = 0;
+  for (const platform of enabled) {
+    const l = store.getListing(platform, sku);
+    if (!l || l.status === 'paused' || !when(platform)) continue;
+    store.enqueue(platform, sku);
+    n++;
+  }
+  return n;
+}
+
+// Produto que sumiu da captura completa (inativado ou excluído na origem —
+// os conectores só trazem os ativos) vira inativo com estoque 0, e os
+// anúncios vão para a fila (pausar/zerar). Captura vazia não desativa nada:
+// pode ser falha da origem, não uma loja sem produtos.
+function deactivateMissing(origin, rows) {
+  if (!rows.length) return 0;
+  const seen = new Set(rows.map((r) => normalizeProduct(r).sku));
+  const enabled = require('../platforms').ids().filter(store.isEnabled);
+  let n = 0;
+  for (const { sku, data } of store.productsByOrigin(origin)) {
+    if (seen.has(sku) || data.active === false) continue;
+    const p = { ...data, active: false, stock: 0, variants: (data.variants || []).map((v) => ({ ...v, stock: 0, active: false })) };
+    if (store.upsertProduct(p, productHash(p), origin)) {
+      n++;
+      enqueueListings(sku, enabled);
+    }
+  }
+  return n;
 }
 
 // Captura da origem configurada.
@@ -152,8 +179,9 @@ async function importFromSource() {
     try {
       const rows = await c.fetchProducts(cfg, await tokens(cfg));
       const result = ingest(rows, c.id);
+      result.deactivated = deactivateMissing(c.id, rows);
       store.setSetting('last_capture', { at: store.now(), startedAt: started, origin: c.id, ...result, invalid: result.invalid.length, invalidList: result.invalid.slice(0, 50) });
-      store.log('info', `Captura (${c.name}): ${result.received} lidos, ${result.changed} novos/alterados, ${result.invalid.length} inválidos, ${result.queued} na fila`);
+      store.log('info', `Captura (${c.name}): ${result.received} lidos, ${result.changed} novos/alterados, ${result.invalid.length} inválidos, ${result.queued} na fila${result.deactivated ? `, ${result.deactivated} inativado(s) por não virem mais da origem` : ''}`);
       return result;
     } catch (e) {
       store.setSetting('last_capture', { at: store.now(), startedAt: started, origin: c.id, error: e.message });

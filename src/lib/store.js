@@ -213,6 +213,10 @@ function upsertProduct(product, hash, origin) {
   refreshSyncHash(product.sku);
   return true;
 }
+// SKUs (e dados) de uma origem: usados para notar quem sumiu da captura.
+function productsByOrigin(origin) {
+  return all('SELECT sku, data FROM products WHERE origin = ?', origin).map((r) => ({ sku: r.sku, data: JSON.parse(r.data) }));
+}
 function getProduct(sku) {
   const row = get('SELECT * FROM products WHERE sku = ?', sku);
   return row ? { ...row, data: JSON.parse(row.data) } : null;
@@ -497,7 +501,7 @@ function consumeOAuthState(state) {
 
 module.exports = {
   open, close, now,
-  getSetting, setSetting, getSecretSetting, setSecretSetting,
+  getSetting, setSetting, getSecretSetting, setSecretSetting, productsByOrigin,
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
   upsertProduct, getProduct, listProducts, listSync, deleteProduct, refreshSyncHash, syncHashOf,
   getPricing, pricingFor, setPricing, getResearch, researchFor, saveResearch, refreshAllSyncHashes,

@@ -29,15 +29,18 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Lista de URLs. Item de array é uma URL inteira (pode ter vírgula, como as
+// transformações do Cloudinary "w_800,h_800"); num texto, separa por quebra de
+// linha, "|" ou ";" — e por vírgula só quando o que vem depois é outra URL.
 function list(v) {
   if (!v) return [];
-  if (Array.isArray(v)) return v.flatMap(list);
+  if (Array.isArray(v)) return v.flatMap((x) => (typeof x === 'object' && x !== null ? list(x) : String(x ?? '').trim() ? [String(x).trim()] : []));
+  if (typeof v === 'object') return v.url ? [String(v.url)] : v.src ? [String(v.src)] : [];
   const s = String(v).trim();
   if (s.startsWith('[')) {
     try { return list(JSON.parse(s)); } catch { /* cai no split */ }
   }
-  if (typeof v === 'object') return v.url ? [String(v.url)] : v.src ? [String(v.src)] : [];
-  return s.split(/[\n|,;]+/).map((x) => x.trim()).filter(Boolean);
+  return s.split(/[\n|;]+|,(?=\s*https?:\/\/)/i).map((x) => x.trim()).filter(Boolean);
 }
 
 function obj(v) {
@@ -46,9 +49,13 @@ function obj(v) {
   try { return JSON.parse(v); } catch { return {}; }
 }
 
-function date(v) {
+// Data só com dia (coluna DATE): vale o dia inteiro no fuso da loja — o
+// início às 00:00 e o fim às 23:59:59 (sem isso, a promoção acabava um dia antes).
+const STORE_TZ = process.env.STORE_TZ_OFFSET || '-03:00';
+function date(v, { endOfDay = false } = {}) {
   if (!v) return null;
-  const d = new Date(v);
+  const s = String(v).trim();
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T${endOfDay ? '23:59:59' : '00:00:00'}${STORE_TZ}` : v);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
@@ -73,7 +80,7 @@ function normalizeProduct(raw) {
     cost: num(pick(r, 'cost', 'custo', 'preco_custo')),
     promoPrice: num(pick(r, 'promoPrice', 'promo_price', 'sale_price', 'preco_promocional')),
     promoStart: date(pick(r, 'promoStart', 'promo_start')),
-    promoEnd: date(pick(r, 'promoEnd', 'promo_end')),
+    promoEnd: date(pick(r, 'promoEnd', 'promo_end'), { endOfDay: true }),
     currency: String(pick(r, 'currency', 'moeda') || 'BRL').toUpperCase(),
     stock: Math.max(0, Math.trunc(num(pick(r, 'stock', 'estoque', 'quantity')) ?? 0)),
     weightKg: num(pick(r, 'weightKg', 'weight_kg', 'weight', 'peso')),
@@ -197,7 +204,24 @@ function validateVariants(variants) {
 
 // O custo só serve à Precificação (nunca vai aos marketplaces): fica fora do
 // hash para não disparar reenvio nem mudar o hash de quem já estava integrado.
-const productHash = (p) => sha256(JSON.stringify({ ...p, cost: undefined }));
+// Links assinados (S3/GCS/CDN, ex.: fotos internas do Bling) mudam a cada
+// leitura só na assinatura: para o hash e para o cache de upload, vale a URL
+// sem esses parâmetros — senão todo produto seria reenviado a cada captura.
+const SIGNING = /^(x-amz-|x-goog-|signature$|expires$|key-pair-id$|policy$|token$|sig$|se$|sp$|sv$|sr$|st$|skoid$|sktid$|skt$|ske$|sks$|skv$)/i;
+function stableUrl(u) {
+  try {
+    const url = new URL(u);
+    const keep = [...url.searchParams].filter(([k]) => !SIGNING.test(k));
+    if (keep.length === [...url.searchParams].length) return u;
+    url.search = keep.length ? `?${new URLSearchParams(keep)}` : '';
+    return url.href;
+  } catch { return u; }
+}
+const stableMedia = (list) => (list || []).map(stableUrl);
+const productHash = (p) => sha256(JSON.stringify({
+  ...p, cost: undefined, images: stableMedia(p.images), videos: stableMedia(p.videos),
+  variants: (p.variants || []).map((v) => ({ ...v, images: stableMedia(v.images) })),
+}));
 
 // Banco do site com uma linha por variação: linhas com o mesmo parent_sku
 // viram um produto com "variants". Os dados do produto (título, descrição,
@@ -228,11 +252,16 @@ function groupVariantRows(rows) {
     });
   }
   for (const head of groups.values()) {
-    // Preço/estoque do pai são derivados das variações.
+    // Preço/estoque/promoção/situação do pai são das variações: a 1ª linha não
+    // pode passar a promoção dela para as outras nem desativar o produto todo.
     delete head.price; delete head.preco; delete head.stock; delete head.estoque; delete head.gtin; delete head.ean;
+    delete head.promo_price; delete head.preco_promocional; delete head.promoPrice; delete head.sale_price;
+    delete head.active; delete head.ativo;
+    const off = ['0', 'false', 'inativo', 'inactive'];
+    head.active = head.variants.some((v) => !off.includes(String(v.active ?? 'true').toLowerCase()));
     for (const k of Object.keys(head)) if (/^(option|opcao|variacao)_/i.test(k)) delete head[k];
   }
   return out;
 }
 
-module.exports = { normalizeProduct, validateProduct, productHash, num, list, groupVariantRows };
+module.exports = { normalizeProduct, validateProduct, productHash, stableUrl, num, list, groupVariantRows };

@@ -3,7 +3,8 @@
 // OAuth2: authorize em bling.com.br/Api/v3/oauth/authorize (code vale 1 min);
 // token em api.bling.com.br/Api/v3/oauth/token com Basic base64(client_id:secret);
 // access token 6 h, refresh token 30 dias. Limite: 3 req/s e 120 mil/dia (429).
-// Lista: GET /produtos?pagina&limite&criterio=2 (ativos); detalhe completo
+// Lista: GET /produtos?pagina&limite&criterio=5 (ativos e inativos: o inativo
+// pausa o anúncio pela "situacao"); detalhe completo
 // (mídia, variações, tributação, dimensões, estoque) em GET /produtos/{id}.
 // Variação: variacao.nome no formato "Tamanho:G;Cor:Verde".
 const { requestJson, PlatformError } = require('../../lib/media');
@@ -117,7 +118,7 @@ module.exports = {
     if (!tokens) throw new PlatformError('Bling: clique em "Conectar" para autorizar o acesso');
     const out = [];
     for (let pagina = 1; pagina <= 2000; pagina++) {
-      const list = await get(tokens, `/produtos?pagina=${pagina}&limite=100&criterio=2&tipo=P`);
+      const list = await get(tokens, `/produtos?pagina=${pagina}&limite=100&criterio=5&tipo=P`);
       const items = list.data || [];
       for (const item of items) {
         if (item.idProdutoPai) continue; // variações vêm no detalhe do produto pai
