@@ -1180,7 +1180,10 @@ function captureAgentDrafts() {
   $app.querySelectorAll('section.agent').forEach((sec) => {
     const d = { slots: {}, options: {} };
     sec.querySelectorAll('[data-slot-provider]').forEach((sel) => {
-      d.slots[sel.dataset.slotProvider] = { provider: sel.value, model: sec.querySelector(`[data-slot-model="${sel.dataset.slotProvider}"]`).value };
+      const k = sel.dataset.slotProvider;
+      const fp = sec.querySelector(`[data-fb-provider="${k}"]`);
+      d.slots[k] = { provider: sel.value, model: sec.querySelector(`[data-slot-model="${k}"]`).value,
+        fallback: fp && fp.value ? { provider: fp.value, model: sec.querySelector(`[data-fb-model="${k}"]`).value } : null };
     });
     sec.querySelectorAll('[data-option]').forEach((i) => { d.options[i.dataset.option] = i.value; });
     state.ai.draft[sec.dataset.agent] = d;
@@ -1234,7 +1237,7 @@ function aiAgentPanel(a) {
   const draft = state.ai.draft[a.id];
   const slotField = (sl0) => {
     const dsl = draft && draft.slots[sl0.key];
-    const sl = dsl ? { ...sl0, provider: dsl.provider, model: dsl.model } : sl0;
+    const sl = dsl ? { ...sl0, provider: dsl.provider, model: dsl.model, fallback: dsl.fallback } : sl0;
     const opts = s.providers.filter((p) => p.can[sl.kind] && p.connected);
     const p = s.providers.find((x) => x.id === sl.provider);
     const rec = p && ((p.recommended || {})[sl.kind] || []);
@@ -1249,7 +1252,16 @@ function aiAgentPanel(a) {
           placeholder="${esc(p ? (p.defaults || {})[sl.kind] || 'id do modelo' : 'escolha o provedor')}" autocomplete="off" ${sl.provider ? '' : 'disabled'}>
         <datalist id="dl-${esc(a.id)}-${esc(sl.key)}">${aiModelOptions(p, sl.kind)}</datalist>
       </div>
-      ${rec && rec.length ? `<span class="help">Recomendado: ${rec.map(esc).join(', ')}</span>` : ''}</div>`;
+      ${rec && rec.length ? `<span class="help">Recomendado: ${rec.map(esc).join(', ')}</span>` : ''}
+      <div class="slot-row slot-fb">
+        <select data-fb-provider="${esc(sl.key)}" data-kind="${esc(sl.kind)}" title="Modelo reserva: entra no lugar do principal se ele falhar">
+          <option value="">Reserva: nenhuma</option>
+          ${opts.map((x) => `<option value="${esc(x.id)}" ${sl.fallback && x.id === sl.fallback.provider ? 'selected' : ''}>Reserva: ${esc(x.name)}</option>`).join('')}
+        </select>
+        <input data-fb-model="${esc(sl.key)}" list="dlf-${esc(a.id)}-${esc(sl.key)}" value="${esc(sl.fallback ? sl.fallback.model : '')}"
+          placeholder="modelo reserva" autocomplete="off" ${sl.fallback ? '' : 'disabled'}>
+        <datalist id="dlf-${esc(a.id)}-${esc(sl.key)}">${aiModelOptions(s.providers.find((x) => sl.fallback && x.id === sl.fallback.provider), sl.kind)}</datalist>
+      </div></div>`;
   };
   return `<section class="panel agent" data-agent="${esc(a.id)}">
     <div class="agent-head"><h3>${esc(a.name)}</h3><span class="badge ${soon ? 'warn' : 'ok'}">${esc(a.status)}</span></div>
@@ -1305,10 +1317,22 @@ function wireAgentes() {
         document.getElementById(input.getAttribute('list')).innerHTML = aiModelOptions(p, sel.dataset.kind);
       };
     });
+    sec.querySelectorAll('[data-fb-provider]').forEach((sel) => {
+      sel.onchange = () => {
+        const p = s.providers.find((x) => x.id === sel.value);
+        const input = sec.querySelector(`[data-fb-model="${sel.dataset.fbProvider}"]`);
+        input.disabled = !p;
+        input.value = p ? (p.defaults || {})[sel.dataset.kind] || '' : '';
+        document.getElementById(input.getAttribute('list')).innerHTML = aiModelOptions(p, sel.dataset.kind);
+      };
+    });
     sec.querySelector('[data-save-agent]').onclick = (e) => busy(e.target, () => {
       const slots = {};
       sec.querySelectorAll('[data-slot-provider]').forEach((sel) => {
-        slots[sel.dataset.slotProvider] = { provider: sel.value, model: sec.querySelector(`[data-slot-model="${sel.dataset.slotProvider}"]`).value };
+        const k = sel.dataset.slotProvider;
+        const fp = sec.querySelector(`[data-fb-provider="${k}"]`);
+        slots[k] = { provider: sel.value, model: sec.querySelector(`[data-slot-model="${k}"]`).value,
+          fallback: sel.value && fp && fp.value ? { provider: fp.value, model: sec.querySelector(`[data-fb-model="${k}"]`).value } : null };
       });
       const options = {};
       sec.querySelectorAll('[data-option]').forEach((i) => { options[i.dataset.option] = i.value; });

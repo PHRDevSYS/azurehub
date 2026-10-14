@@ -243,3 +243,4 @@ details.audit summary { cursor: pointer; }
 details.audit[open] summary { margin-bottom: 8px; }
 @media (max-width: 720px) { .slot-row { flex-direction: column; } .slot-row select { flex-basis: auto; } }
 .pv-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.slot-fb { margin-top: 6px; }

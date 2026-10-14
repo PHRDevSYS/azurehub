@@ -209,6 +209,18 @@ vídeo à mais próxima que o modelo aceita. Observação de out/2026: o
 `qwen/qwen3-8b` ficou **sem fornecedor** no OpenRouter (e o `qwen3.5-9b` sai do
 catálogo em 21/10/2026); o `qwen/qwen3-14b` é o Qwen pequeno mais próximo.
 
+### Modelo reserva
+
+Cada função de um agente aceita um **modelo reserva** (em outro provedor, se
+quiser): se o principal falhar — fora do ar, sem saldo, limite de uso, bloqueio
+— a mesma chamada é repetida no reserva e o aviso fica no log. Vale para o
+roteiro e as fotos/vídeo da mídia UGC, para o agente de Precificação e para o
+Auditor (o resultado registra qual modelo respondeu; na mídia UGC o pedido
+guarda o modelo que de fato gerou). Vídeo: o reserva entra só se falhar ao
+*iniciar* a geração; um job já criado no provedor continua nele. Reserva igual
+ao principal é ignorado, e remover a chave de um provedor tira também as
+reservas dele.
+
 ### Geração de mídia UGC (Prévia)
 
 Para cada produto, o agente cria 4 mídias com um(a) **influencer fictício(a)**
@@ -710,7 +722,6 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
 - [ ] **CRM (atendimento)**: o agente aparece na tela com a escolha de modelo,
       mas responder compradores ainda não está implementado.
 - [ ] **Desempenho em catálogos enormes (50 mil+)**: a captura bloqueia o servidor por alguns segundos por lote; o hash de senha (`scrypt`) é síncrono; a pesquisa de preços roda um produto por vez (respeitando o intervalo por site). Medido: 20 mil produtos capturados em ~3 s, busca em ~30 ms.
-- [ ] **Modelo reserva por agente** (usar outro modelo quando o principal falhar) ainda não existe.
 - [ ] Teste de navegador opcional: `tools/e2e-panel.js` (precisa do Playwright).
 - [ ] **Vídeo no Mercado Livre** por arquivo (clips); hoje só YouTube.
 - [ ] **Webhooks/notificações** das plataformas (pedidos, perguntas, mudança

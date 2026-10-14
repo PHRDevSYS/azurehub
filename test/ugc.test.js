@@ -44,11 +44,13 @@ const fake = providers.register({
   async test(cfg) { return { account: `chave ${cfg.apiKey.slice(-3)}` }; },
   async writeJson(cfg, { system, user }) {
     seen.text.push({ cfg, system, user: JSON.parse(user) });
+    if (cfg.models.text === 'txt-quebrado') throw new Error('modelo de texto fora do ar');
     if (fake.failText) throw new Error('modelo de texto fora do ar');
     return { uso: 'Prompt do agente: influencer usando a garrafa na academia, produto idêntico às fotos.', posse: 'curto', especificacoes: 'Prompt do agente: arte com especificações reais da garrafa térmica.', video: 'Prompt do agente: vídeo 9:16 com CTA "Corre!" na primeira frase e fala em português.' };
   },
   async image(cfg, { prompt, refs, persona, aspect }) {
     seen.image.push({ model: cfg.models.image, prompt, refs: refs.map((r) => r.url), persona, aspect });
+    if (cfg.models.image === 'img-quebrada') throw new Error('IA Simulada: modelo fora do ar');
     if (/BLOQUEIA/.test(prompt)) throw new Error('IA Simulada: o pedido foi bloqueado pela política de conteúdo');
     if (/HTMLFALSO/.test(prompt)) return { buffer: Buffer.from('<html><script>alert(1)</script></html>'), mime: 'text/html' };
     if (/OCUPADO/.test(prompt) && fake.busy-- > 0) throw new AiError('IA Simulada: limite de uso atingido', { status: 429, retryable: true });
@@ -380,4 +382,33 @@ test('não enfileira a mesma mídia duas vezes e a persona só espera a foto que
   assert.equal(store.ugcPendingUso('COP', 'masculino', first), null, 'a mais nova não trava a mais antiga');
   store.ugcUpdate(first, { status: 'error', error: 'x' });
   store.ugcUpdate(later, { status: 'error', error: 'x' });
+});
+
+test('modelo reserva: quando o principal falha, o reserva responde (texto e foto) e o pedido registra qual foi usado', async () => {
+  let r = await setAgent('midia', { slots: {
+    text: { provider: 'fake', model: 'txt-quebrado', fallback: { provider: 'fake', model: 'txt-1' } },
+    image: { provider: 'fake', model: 'img-quebrada', fallback: { provider: 'fake', model: 'img-2' } },
+  } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(slot(r, 'image').fallback, { provider: 'fake', model: 'img-2' });
+  assert.equal((await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-1', fallback: { provider: 'nada' } } } })).status, 400);
+  assert.equal((await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-quebrada', fallback: { provider: 'fake', model: 'img-quebrada' } } } })).status, 200);
+  assert.equal(slot(await call('GET', '/api/ai').then((x) => ({ body: x.body })), 'image').fallback, null, 'reserva igual ao principal não conta');
+  await setAgent('midia', { slots: { text: { provider: 'fake', model: 'txt-quebrado', fallback: { provider: 'fake', model: 'txt-1' } }, image: { provider: 'fake', model: 'img-quebrada', fallback: { provider: 'fake', model: 'img-2' } } } });
+
+  const plan = await call('POST', '/api/ugc/COP/plan', { gender: 'feminino' });
+  assert.equal(plan.body.by, 'agente', 'o roteiro saiu do modelo reserva');
+  await call('POST', '/api/ugc/COP/generate', { gender: 'feminino', items: [{ kind: 'especificacoes', prompt: 'Arte do copo térmico com as especificações reais do produto.' }] });
+  const now = Object.fromEntries((await untilDone('COP')).map((x) => [x.kind, x]));
+  assert.equal(now.especificacoes.status, 'done');
+  assert.equal(now.especificacoes.model, 'img-2', 'o pedido guarda o modelo que de fato gerou');
+  assert.ok(store.listLogs({ limit: 50 }).some((l) => /modelo reserva/.test(l.message)));
+
+  // Sem reserva, o erro do principal aparece.
+  await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-quebrada' } } });
+  await call('POST', '/api/ugc/COP/generate', { gender: 'feminino', items: [{ kind: 'especificacoes', prompt: 'Arte do copo térmico com as especificações reais do produto.' }] });
+  const err = Object.fromEntries((await untilDone('COP')).map((x) => [x.kind, x]));
+  assert.equal(err.especificacoes.status, 'error');
+  assert.match(err.especificacoes.error, /fora do ar/);
+  await setAgent('midia', { slots: { image: { provider: 'fake', model: 'img-2' }, text: { provider: 'fake', model: 'txt-1' } } });
 });

@@ -9,7 +9,7 @@ const runner = require('../ugc/runner');
 
 const GENDERS = ['feminino', 'masculino'];
 const agentKinds = () => agent.KINDS.map((k) => ({ kind: k, label: agent.LABELS[k] }));
-const writer = () => ai.resolve('midia', 'text', { optional: true }) || { provider: { name: 'AzureHub' }, cfg: { models: {} } };
+const writer = () => ai.resolve('midia', 'text', { optional: true }) || { provider: { name: 'AzureHub' }, cfg: { models: {} }, fallback: null };
 
 function wrap(fn) {
   return async (ctx) => {
@@ -68,8 +68,8 @@ function register(r, { requireAdmin }) {
     const { gender } = await readJson(ctx.req);
     if (!GENDERS.includes(gender)) throw new Error('Escolha o gênero do(a) influencer: feminino ou masculino');
     // Sem modelo de texto escolhido, o agente usa os prompts-padrão.
-    const { provider, cfg } = writer();
-    const plan = await agent.planPrompts(provider, cfg, prod.data, gender, { videoSeconds: ai.videoSeconds() });
+    const { provider, cfg, fallback } = writer();
+    const plan = await agent.planPrompts(provider, cfg, prod.data, gender, { videoSeconds: ai.videoSeconds(), fallback });
     for (const k of agent.KINDS) store.ugcInsert({ sku: prod.sku, kind: k, gender, prompt: plan.prompts[k], status: 'draft' });
     return { by: plan.by, note: plan.note, items: itemsOf(prod.sku) };
   }));
@@ -107,8 +107,8 @@ function register(r, { requireAdmin }) {
           const latest = Object.fromEntries(store.ugcLatest(sku).filter((x) => x.gender === gender && validPrompt(x.prompt)).map((x) => [x.kind, x.prompt.trim()]));
           let prompts = latest;
           if (agent.KINDS.some((k) => !latest[k])) {
-            const { provider, cfg } = writer();
-            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: ai.videoSeconds() })).prompts, ...latest };
+            const { provider, cfg, fallback } = writer();
+            prompts = { ...(await agent.planPrompts(provider, cfg, store.getProduct(sku).data, gender, { videoSeconds: ai.videoSeconds(), fallback })).prompts, ...latest };
           }
           runner.generate({ sku, gender, items: agent.KINDS.map((kind) => ({ kind, prompt: prompts[kind] })) });
         } catch (e) {

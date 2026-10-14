@@ -133,10 +133,24 @@ async function work(id) {
   const slot = item.kind === 'video' ? 'video' : 'image';
   // O provedor e o modelo gravados no pedido valem, mesmo que a escolha na
   // tela Agentes de IA mude depois.
-  const { provider, cfg } = ai.connection(item.provider, { [slot]: item.model });
+  let { provider, cfg } = ai.connection(item.provider, { [slot]: item.model });
   if (!providers.can(provider, slot)) throw new Error(`${provider.name} não gera ${slot === 'video' ? 'vídeos' : 'imagens'}`);
-  const accept = provider.acceptMimes || COMMON_MIMES;
+  // Modelo reserva da função (Agentes de IA), se houver e for outro modelo.
+  const reserve = () => {
+    const r = ai.resolve('midia', slot, { optional: true });
+    const fb = r && r.fallback;
+    return fb && !(fb.provider.id === provider.id && fb.model === item.model) ? fb : null;
+  };
+  const switchTo = (fb, why) => {
+    store.log('warn', `Mídia UGC: ${provider.name} (${item.model}) falhou — usando o modelo reserva ${fb.provider.name} (${fb.model}): ${why}`, { sku: item.sku });
+    provider = fb.provider;
+    cfg = fb.cfg;
+    item.provider = fb.provider.id;
+    item.model = fb.model;
+    store.ugcUpdate(id, { provider: item.provider, model: item.model });
+  };
   const inputs = async () => {
+    const accept = provider.acceptMimes || COMMON_MIMES;
     const products = await references(prod.data, accept);
     const face = ['posse', 'video'].includes(item.kind) ? await persona(item, accept) : null;
     const refs = face ? [face, ...products] : products;
@@ -145,16 +159,38 @@ async function work(id) {
   };
   if (slot === 'image') {
     store.ugcUpdate(id, { status: 'running' });
-    const { refs, prompt, persona: hasPersona } = await inputs();
-    const out = await retrying(() => provider.image(cfg, { prompt, refs, persona: hasPersona, aspect: '4:5' }));
+    const shoot = async () => {
+      const { refs, prompt, persona: hasPersona } = await inputs();
+      return retrying(() => provider.image(cfg, { prompt, refs, persona: hasPersona, aspect: '4:5' }));
+    };
+    let out;
+    try {
+      out = await shoot();
+    } catch (e) {
+      const fb = reserve();
+      if (!fb) throw e;
+      switchTo(fb, e.message);
+      out = await shoot();
+    }
     await save(item, out.buffer, out.mime);
     return;
   }
   let job = item.job;
   if (!job) {
     store.ugcUpdate(id, { status: 'running' });
-    const { refs, prompt, persona: hasPersona } = await inputs();
-    const out = await retrying(() => provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.videoSeconds(), aspect: '9:16' }));
+    const begin = async () => {
+      const { refs, prompt, persona: hasPersona } = await inputs();
+      return retrying(() => provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.videoSeconds(), aspect: '9:16' }));
+    };
+    let out;
+    try {
+      out = await begin();
+    } catch (e) {
+      const fb = reserve();
+      if (!fb) throw e;
+      switchTo(fb, e.message);
+      out = await begin();
+    }
     if (out.buffer) { await save(item, out.buffer, out.mime || 'video/mp4'); return; } // provedor que responde na hora
     job = out.job;
     store.ugcUpdate(id, { job: String(job) });

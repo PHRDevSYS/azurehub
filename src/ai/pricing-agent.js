@@ -33,7 +33,9 @@ async function reviewOffers(product, offers, minSimilarity) {
     ofertas: list.map((o, i) => ({ i, titulo: String(o.title || '').slice(0, 200), preco: o.price, loja: o.seller || o.source || null })),
   };
   try {
-    const out = await conn.provider.writeJson(conn.cfg, { system: SYSTEM, user: JSON.stringify(brief) });
+    const { value: out, used } = await ai.withFallback(conn, (t) => t.provider.writeJson(t.cfg, { system: SYSTEM, user: JSON.stringify(brief) }));
+    info.provider = used.provider.id;
+    info.model = used.model;
     for (const v of Array.isArray(out && out.ofertas) ? out.ofertas : []) {
       const o = list[Number(v.i)];
       if (!o || typeof v.mesmo !== 'boolean' || o.ai) continue;

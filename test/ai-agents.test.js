@@ -188,3 +188,27 @@ test('normalize aguenta resposta vazia ou torta do modelo', () => {
   assert.deepEqual(n, { score: null, summary: '', findings: [], titles: {} });
   assert.equal(auditor.normalize({ nota: 99, achados: 'x' }, []).score, 10);
 });
+
+test('modelo reserva: agente de Precificação e Auditor trocam para o reserva quando o principal falha', async () => {
+  const set = await call('PUT', '/api/ai/agents/precificacao', { slots: { text: { provider: 'fk', model: 't1', fallback: { provider: 'fk', model: 't2' } } } });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.body.agents.find((a) => a.id === 'precificacao').slots[0].fallback, { provider: 'fk', model: 't2' });
+  seen.length = 0;
+  reply = (system, brief) => {
+    if (seen.at(-1).model === 't1') throw new Error('t1 fora do ar');
+    return { ofertas: brief.ofertas.map((o) => ({ i: o.i, mesmo: /1 Litro/.test(o.titulo), motivo: 'ok' })) };
+  };
+  const r = await runResearch();
+  assert.equal(r.agent.error, undefined, 'o reserva respondeu');
+  assert.equal(r.agent.model, 't2');
+  assert.deepEqual(seen.map((s) => s.model).slice(0, 2), ['t1', 't2']);
+
+  // Auditor: principal quebrado, reserva devolve a auditoria (registrada com o modelo que respondeu).
+  await call('PUT', '/api/ai/agents/auditor', { slots: { text: { provider: 'fk', model: 't1', fallback: { provider: 'fk', model: 't2' } } } });
+  reply = () => ({ nota: 7, resumo: 'ok', achados: [], titulos: {} });
+  const orig = reply;
+  reply = (s, b) => { if (seen.at(-1).model === 't1') throw new Error('t1 fora do ar'); return orig(s, b); };
+  const a = await auditor.audit('GAR', ['mercadolivre']);
+  assert.equal(a.model, 't2');
+  await call('PUT', '/api/ai/agents/precificacao', { slots: { text: { provider: '' } } });
+});

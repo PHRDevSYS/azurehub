@@ -105,11 +105,19 @@ function referenceNote(kind, { persona = false, products = 0 } = {}) {
 }
 
 // Prompts pelo agente (modelo de texto do provedor) com fallback para os modelos.
-async function planPrompts(provider, cfg, p, gender, { videoSeconds = 8 } = {}) {
+async function planPrompts(provider, cfg, p, gender, { videoSeconds = 8, fallback = null } = {}) {
   const base = templatePrompts(p, gender, { videoSeconds });
   if (!provider.writeJson || !cfg.models.text) return { prompts: base, by: 'modelo', note: 'Prompts-padrão do AzureHub (provedor sem modelo de texto)' };
   try {
-    const out = await provider.writeJson(cfg, { system: SYSTEM, user: briefFor(p, gender, videoSeconds) });
+    const ask = (t) => t.provider.writeJson(t.cfg, { system: SYSTEM, user: briefFor(p, gender, videoSeconds) });
+    let out;
+    try {
+      out = await ask({ provider, cfg });
+    } catch (e) {
+      if (!fallback) throw e;
+      cfg = fallback.cfg; // modelo reserva do roteiro
+      out = await ask(fallback);
+    }
     const prompts = {};
     for (const k of KINDS) prompts[k] = typeof out[k] === 'string' && out[k].trim().length > 40 ? out[k].trim() : base[k];
     return { prompts, by: 'agente', note: `Roteiro escrito pelo agente (${cfg.models.text})` };

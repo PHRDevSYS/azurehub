@@ -50,11 +50,21 @@ function optionsOf(agent, cfg) {
 }
 
 // Função de um agente: provedor e modelo (vazio = padrão do provedor).
-function slotOf(agent, slot, cfg) {
-  const saved = (((cfg.agents[agent.id] || {}).slots) || {})[slot.key];
-  if (!saved || !saved.provider) return { provider: null, model: '' };
+function pickOf(saved, slot) {
+  if (!saved || !saved.provider) return null;
   const p = providers.get(saved.provider);
   return { provider: saved.provider, model: saved.model || (p && (p.defaults || {})[slot.kind]) || '' };
+}
+
+// Modelo reserva: entra no lugar do principal quando ele falha (fora do ar,
+// sem saldo, limite de uso…). Igual ao principal não conta.
+function slotOf(agent, slot, cfg) {
+  const saved = (((cfg.agents[agent.id] || {}).slots) || {})[slot.key];
+  const main = pickOf(saved, slot);
+  if (!main) return { provider: null, model: '', fallback: null };
+  let fb = pickOf(saved.fallback, slot);
+  if (fb && fb.provider === main.provider && fb.model === main.model) fb = null;
+  return { ...main, fallback: fb };
 }
 
 function summary() {
@@ -89,7 +99,10 @@ function saveProvider(id, input = {}) {
   // Sem chave, o provedor sai das funções que ocupava.
   if (!keyOf(p.id)) {
     for (const a of Object.values(cfg.agents)) {
-      for (const [k, s] of Object.entries(a.slots || {})) if (s && s.provider === p.id) a.slots[k] = null;
+      for (const [k, s] of Object.entries(a.slots || {})) {
+        if (s && s.provider === p.id) a.slots[k] = null;
+        else if (s && s.fallback && s.fallback.provider === p.id) delete s.fallback;
+      }
     }
   }
   store.setSetting('ai', cfg);
@@ -108,11 +121,20 @@ function saveAgent(id, input = {}) {
     const v = input.slots[s.key] || {};
     const pid = clean(v.provider);
     if (!pid) { slots[s.key] = null; continue; }
-    const p = providers.get(pid);
-    if (!p) throw new Error(`Provedor de IA desconhecido: ${pid}`);
-    if (!providers.can(p, s.kind)) throw new Error(`${p.name} não tem modelo de ${KIND[s.kind]} para "${s.label}"`);
-    if (!keyOf(p.id)) throw new Error(`Conecte ${p.name} (chave de API) antes de usá-lo em "${s.label}"`);
+    const check = (id, what) => {
+      const p = providers.get(id);
+      if (!p) throw new Error(`Provedor de IA desconhecido: ${id}`);
+      if (!providers.can(p, s.kind)) throw new Error(`${p.name} não tem modelo de ${KIND[s.kind]} para "${s.label}"`);
+      if (!keyOf(p.id)) throw new Error(`Conecte ${p.name} (chave de API) antes de usá-lo em "${s.label}"${what}`);
+      return p;
+    };
+    const p = check(pid, '');
     slots[s.key] = { provider: p.id, model: clean(v.model) };
+    const fid = v.fallback ? clean(v.fallback.provider) : '';
+    if (fid) {
+      const fp = check(fid, ' (modelo reserva)');
+      slots[s.key].fallback = { provider: fp.id, model: clean(v.fallback.model) };
+    }
   }
   const options = { ...cur.options };
   for (const o of agent.options) {
@@ -148,7 +170,22 @@ function resolve(agentId, slotKey, { optional = false } = {}) {
     throw new Error(`Escolha o modelo de ${KIND[slot.kind]} para "${slot.label}" em Agentes de IA › ${agent.name}`);
   }
   const conn = connection(pid, { [slot.kind]: model });
-  return { ...conn, model, kind: slot.kind };
+  const out = { ...conn, model, kind: slot.kind, fallback: null };
+  const fb = slotOf(agent, slot, cfg).fallback;
+  if (fb && fb.model && keyOf(fb.provider)) out.fallback = { ...connection(fb.provider, { [slot.kind]: fb.model }), model: fb.model, kind: slot.kind };
+  return out;
+}
+
+// Executa fn(alvo) no modelo principal; se ele falhar e houver reserva, repete
+// no reserva. Devolve também qual dos dois respondeu.
+async function withFallback(target, fn) {
+  try {
+    return { value: await fn(target), used: target, fellBack: false };
+  } catch (e) {
+    if (!target.fallback) throw e;
+    store.log('warn', `Agentes de IA: ${target.provider.name} (${target.model}) falhou — usando o modelo reserva ${target.fallback.provider.name} (${target.fallback.model}): ${e.message}`);
+    return { value: await fn(target.fallback), used: target.fallback, fellBack: true };
+  }
 }
 
 const options = (agentId) => optionsOf(agents.get(agentId), get());
@@ -171,9 +208,10 @@ function modelsInUse(pid) {
     for (const s of a.slots) {
       const v = slotOf(a, s, cfg);
       if (v.provider === pid && v.model && !out[s.kind]) out[s.kind] = v.model;
+      else if (v.fallback && v.fallback.provider === pid && v.fallback.model && !out[s.kind]) out[s.kind] = v.fallback.model;
     }
   }
   return out;
 }
 
-module.exports = { get, summary, saveProvider, saveAgent, connection, resolve, options, videoSeconds, modelsInUse, keyName };
+module.exports = { get, summary, saveProvider, saveAgent, connection, resolve, withFallback, options, videoSeconds, modelsInUse, keyName };

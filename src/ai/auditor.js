@@ -49,7 +49,7 @@ function normalize(out, platforms) {
 }
 
 async function audit(sku, requested) {
-  const { provider, cfg, model } = ai.resolve('auditor', 'text');
+  const target = ai.resolve('auditor', 'text');
   const platforms = (requested.length ? requested : Object.keys(PLATFORMS)).filter((id) => PLATFORMS[id]);
   if (!platforms.length) throw new Error('Escolha ao menos um marketplace para auditar');
   const prod = store.getProduct(sku);
@@ -71,8 +71,8 @@ async function audit(sku, requested) {
       }];
     })),
   };
-  const out = await provider.writeJson(cfg, { system: SYSTEM, user: JSON.stringify(brief, null, 1) });
-  const result = { ...normalize(out || {}, platforms), platforms, provider: provider.id, model };
+  const { value: out, used } = await ai.withFallback(target, (t) => t.provider.writeJson(t.cfg, { system: SYSTEM, user: JSON.stringify(brief, null, 1) }));
+  const result = { ...normalize(out || {}, platforms), platforms, provider: used.provider.id, model: used.model };
   store.saveAudit(sku, result);
   store.log('info', `Auditor de anúncios: ${result.findings.length} achado(s), nota ${result.score ?? '—'}`, { sku });
   return { ...result, createdAt: new Date().toISOString() };
