@@ -40,6 +40,11 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
+// 401 já levou ao login: o erro das requisições em andamento não é um defeito.
+window.addEventListener('unhandledrejection', (e) => {
+  if (e.reason && /Sessão|Faça login/.test(e.reason.message)) e.preventDefault();
+});
+
 let toastTimer;
 function toast(msg, isErr = false) {
   const el = document.getElementById('toast');
@@ -85,13 +90,13 @@ function field(f, value) {
   const show = f.showIf ? ` data-show='${esc(JSON.stringify(f.showIf))}'` : '';
   let input;
   if (f.type === 'select') {
-    input = `<select name="${f.key}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+    input = `<select name="${esc(f.key)}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   } else if (f.type === 'checkbox') {
-    return `<div class="fld"${show}><label class="switch"><input type="checkbox" name="${f.key}" ${value ? 'checked' : ''}> ${esc(f.label)}</label>${help}</div>`;
+    return `<div class="fld"${show}><label class="switch"><input type="checkbox" name="${esc(f.key)}" ${value ? 'checked' : ''}> ${esc(f.label)}</label>${help}</div>`;
   } else if (f.type === 'sql') {
-    input = `<textarea name="${f.key}" class="mono" spellcheck="false">${esc(value)}</textarea>`;
+    input = `<textarea name="${esc(f.key)}" class="mono" spellcheck="false">${esc(value)}</textarea>`;
   } else {
-    input = `<input name="${f.key}" type="${f.type === 'password' ? 'password' : 'text'}" value="${esc(value)}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">`;
+    input = `<input name="${esc(f.key)}" type="${f.type === 'password' ? 'password' : 'text'}" value="${esc(value)}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">`;
   }
   return `<div class="fld"${show}><label>${esc(f.label)}${f.required ? ' *' : ''}${help}</label>${input}</div>`;
 }
@@ -115,7 +120,7 @@ function originPicker(catalog, current) {
   const order = ['ERP', 'Site/loja', 'Banco de dados', 'API'];
   const list = [...catalog].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
   return `<div class="origins">${list.map((c) => `
-    <button type="button" class="origin ${c.id === current ? 'on' : ''}" data-origin="${c.id}">
+    <button type="button" class="origin ${c.id === current ? 'on' : ''}" data-origin="${esc(c.id)}">
       <span class="kind">${esc(c.kind)}</span><b>${esc(c.name)}</b><small>${esc(c.description)}</small>
     </button>`).join('')}</div>
     <div id="origin-fields"></div>`;
@@ -410,8 +415,8 @@ async function renderCards() {
   el.innerHTML = list.map((p) => {
     const status = p.connected ? '<span class="badge ok">Conectado</span>'
       : p.configured ? '<span class="badge warn">Falta conectar</span>' : '<span class="badge">Não configurado</span>';
-    return `<article class="card" data-id="${p.id}">
-      <div class="card-head" style="background:${p.color};color:${p.textColor}">${esc(p.name)} ${status}</div>
+    return `<article class="card" data-id="${esc(p.id)}">
+      <div class="card-head" style="background:${esc(p.color)};color:${esc(p.textColor)}">${esc(p.name)} ${status}</div>
       <div class="card-body"><dl>
         <dt>Conta</dt><dd>${esc(p.account || '—')}</dd>
         <dt>Token até</dt><dd>${when(p.tokenExpiresAt)}</dd>
@@ -652,7 +657,7 @@ async function viewPrecificacao() {
 async function loadPricing() {
   const pz = state.pricing;
   const skus = [...pz.picked];
-  const data = await api(`/api/pricing${skus.length ? `?skus=${encodeURIComponent(skus.join(','))}` : ''}`);
+  const data = await api('/api/pricing/grid', { method: 'POST', body: { skus } });
   pz.rows = data.items;
   pz.settings = data.settings;
   pz.sources = data.sources;
@@ -928,7 +933,9 @@ async function openPricingSettings() {
   document.getElementById('drawer-title').textContent = 'Precificação — fontes e regras';
   body.innerHTML = '<p class="muted">Carregando…</p>';
   if (!drawer.open) drawer.showModal();
-  const { settings: cfg, sourceTypes } = await api('/api/pricing/settings');
+  let loaded;
+  try { loaded = await api('/api/pricing/settings'); } catch (e) { body.innerHTML = `<p class="lvl-error">${esc(e.message)}</p>`; return; }
+  const { settings: cfg, sourceTypes } = loaded;
   const types = Object.fromEntries(sourceTypes.map((t) => [t.type, t]));
   const srcs = cfg.sources.map((s) => ({ ...s }));
   const ml = state.platforms.find((p) => p.id === 'mercadolivre');
@@ -1070,7 +1077,7 @@ function drawPreview(total, targets) {
   send.textContent = `Enviar ${included} prontos`;
   send.onclick = (e) => busy(e.target, async () => {
     const byPlat = {};
-    for (const [k, on] of Object.entries(pv.include)) if (on) { const [sku, pid] = k.split('|'); (byPlat[pid] ||= []).push(sku); }
+    for (const [k, on] of Object.entries(pv.include)) if (on) { const i = k.lastIndexOf('|'); (byPlat[k.slice(i + 1)] ||= []).push(k.slice(0, i)); }
     let q = 0;
     for (const [pid, skus] of Object.entries(byPlat)) q += (await api('/api/integrations/send', { method: 'POST', body: { skus, platforms: [pid] } })).queued;
     toast(`${q} envios na fila`);
@@ -1103,12 +1110,15 @@ function drawPreview(total, targets) {
     card.querySelector('[data-ugc]').onclick = () => openUgc(pv.items.filter((x) => !x.missing).map((x) => x.sku), sku);
     card.querySelector('[data-audit]').onclick = (e) => busy(e.target, async () => {
       pv.audits[sku] = await api(`/api/ai/auditor/${encodeURIComponent(sku)}`, { method: 'POST', body: { platforms: targets } });
-      card.querySelector('[data-audit-box]').innerHTML = auditBox(pv.audits[sku], true);
+      // A lista pode ter sido redesenhada enquanto a IA respondia: acha o cartão atual.
+      const box = document.querySelector(`[data-audit-box="${CSS.escape(sku)}"]`);
+      if (box) box.innerHTML = auditBox(pv.audits[sku], true);
     });
     // Última auditoria salva (sem chamar a IA de novo).
     if (!(sku in pv.audits)) {
       pv.audits[sku] = null;
       api(`/api/ai/auditor/${encodeURIComponent(sku)}`).then((r) => {
+        if (pv.audits[sku]) return; // uma auditoria nova chegou antes
         pv.audits[sku] = r.audit;
         const box = document.querySelector(`[data-audit-box="${CSS.escape(sku)}"]`);
         if (box && r.audit) box.innerHTML = auditBox(r.audit);
@@ -1157,14 +1167,28 @@ function previewBody(it, pid) {
 // Provedores de IA (uma chave por provedor, cifrada no servidor) e, para cada
 // agente, qual provedor e qual modelo executam cada função.
 const KIND_LABEL = { text: 'texto', image: 'imagem', video: 'vídeo' };
-state.ai = { data: null, pick: null };
+state.ai = { data: null, pick: null, draft: {} }; // draft: edições de agente ainda não salvas
 
 async function viewAgentes() {
+  state.ai.draft = {};
   state.ai.data = await api('/api/ai');
   drawAgentes();
 }
 
+// Guarda o que está digitado nos agentes antes de redesenhar a tela.
+function captureAgentDrafts() {
+  $app.querySelectorAll('section.agent').forEach((sec) => {
+    const d = { slots: {}, options: {} };
+    sec.querySelectorAll('[data-slot-provider]').forEach((sel) => {
+      d.slots[sel.dataset.slotProvider] = { provider: sel.value, model: sec.querySelector(`[data-slot-model="${sel.dataset.slotProvider}"]`).value };
+    });
+    sec.querySelectorAll('[data-option]').forEach((i) => { d.options[i.dataset.option] = i.value; });
+    state.ai.draft[sec.dataset.agent] = d;
+  });
+}
+
 function drawAgentes() {
+  captureAgentDrafts();
   const s = state.ai.data;
   const cur = s.providers.find((p) => p.id === state.ai.pick);
   const caps = (p) => ['text', 'image', 'video'].filter((k) => p.can[k]).map((k) => KIND_LABEL[k]).join(' · ');
@@ -1207,7 +1231,10 @@ function aiModelOptions(p, kind) {
 function aiAgentPanel(a) {
   const s = state.ai.data;
   const soon = a.status !== 'ativo';
-  const slotField = (sl) => {
+  const draft = state.ai.draft[a.id];
+  const slotField = (sl0) => {
+    const dsl = draft && draft.slots[sl0.key];
+    const sl = dsl ? { ...sl0, provider: dsl.provider, model: dsl.model } : sl0;
     const opts = s.providers.filter((p) => p.can[sl.kind] && p.connected);
     const p = s.providers.find((x) => x.id === sl.provider);
     const rec = p && ((p.recommended || {})[sl.kind] || []);
@@ -1230,7 +1257,7 @@ function aiAgentPanel(a) {
     <div class="grid2">
       ${a.slots.map(slotField).join('')}
       ${a.options.map((o) => `<div class="fld"><label>${esc(o.label)}${o.help ? `<span class="help">${esc(o.help)}</span>` : ''}</label>
-        <input data-option="${esc(o.key)}" inputmode="numeric" value="${esc(a.values[o.key])}"></div>`).join('')}
+        <input data-option="${esc(o.key)}" inputmode="numeric" value="${esc(draft && draft.options[o.key] !== undefined ? draft.options[o.key] : a.values[o.key])}"></div>`).join('')}
     </div>
     <div class="actions"><button class="primary" data-save-agent="${esc(a.id)}">Salvar ${esc(a.name)}</button></div>
   </section>`;
@@ -1286,6 +1313,7 @@ function wireAgentes() {
       const options = {};
       sec.querySelectorAll('[data-option]').forEach((i) => { options[i.dataset.option] = i.value; });
       const a = s.agents.find((x) => x.id === sec.dataset.agent);
+      delete state.ai.draft[a.id];
       return apply({ slots, options }, `/api/ai/agents/${encodeURIComponent(a.id)}`, `${a.name}: modelos salvos`);
     });
   });
@@ -1397,6 +1425,9 @@ function drawUgcCards(items, resetPrompts) {
   const labels = Object.fromEntries((state.ugc.settings.kinds || []).map((k) => [k.kind, k.label]));
   const typed = {};
   grid.querySelectorAll('textarea[data-kind]').forEach((t) => { if (t.dataset.dirty) typed[t.dataset.kind] = t.value; });
+  // Mídia que não mudou mantém os mesmos elementos (o vídeo em reprodução não reinicia).
+  const oldMedia = {};
+  grid.querySelectorAll('.ugc-media[data-sig]').forEach((m) => { oldMedia[m.closest('.ugc-card').dataset.kind] = m; });
   const order = ['uso', 'posse', 'especificacoes', 'video'];
   grid.innerHTML = order.map((kind, i) => {
     const it = items.find((x) => x.kind === kind) || { kind, status: 'empty' };
@@ -1405,7 +1436,7 @@ function drawUgcCards(items, resetPrompts) {
     const working = ['queued', 'running'].includes(it.status);
     return `<article class="ugc-card" data-kind="${kind}">
       <header><b>${i + 1}. ${esc(labels[kind] || kind)}</b> <span class="badge ${cls}">${esc(label)}</span></header>
-      <div class="ugc-media">${ugcMedia(it)}</div>
+      <div class="ugc-media" data-sig="${esc(`${(it.url ? it : it.previous || {}).id || 0}|${working}|${it.status}`)}">${ugcMedia(it)}</div>
       ${it.status === 'error' ? `<p class="lvl-error small">${esc(it.error)}</p>` : ''}
       ${it.model ? `<p class="muted small">${esc(it.provider)} · ${esc(it.model)}</p>` : ''}
       <label class="small">Prompt (edite e gere de novo quando quiser)</label>
@@ -1415,6 +1446,10 @@ function drawUgcCards(items, resetPrompts) {
         <button data-gen="${kind}" class="primary" ${working ? 'disabled' : ''}>${it.url || it.previous || it.status === 'error' ? 'Gerar de novo' : 'Gerar'}</button>
       </div></article>`;
   }).join('');
+  grid.querySelectorAll('.ugc-media[data-sig]').forEach((m) => {
+    const old = oldMedia[m.closest('.ugc-card').dataset.kind];
+    if (old && old.dataset.sig === m.dataset.sig) m.replaceWith(old);
+  });
   grid.querySelectorAll('textarea[data-kind]').forEach((t) => { t.oninput = () => { t.dataset.dirty = '1'; }; });
   grid.querySelectorAll('[data-gen]').forEach((b) => { b.onclick = () => busy(b, () => ugcGenerate([b.dataset.gen])); });
 }
@@ -1446,7 +1481,7 @@ async function viewSincronizacao() {
     <div id="sub"></div>`;
   document.querySelectorAll('[data-sub]').forEach((b) => { b.onclick = () => { s.tab = b.dataset.sub; viewSincronizacao(); }; });
   document.getElementById('auto').onchange = (e) => { s.auto = e.target.checked; };
-  document.getElementById('refresh').onclick = () => drawSub();
+  document.getElementById('refresh').onclick = (e) => busy(e.target, () => drawSub());
   await drawSub();
   if (location.hash !== '#sincronizacao') return;
   clearInterval(refreshTimer);
@@ -1467,13 +1502,13 @@ async function drawSub(silent) {
       <div class="table-wrap"><table><tr><th>#</th><th>Destino</th><th>SKU</th><th>Status</th><th class="num">Tentativas</th><th>Próxima tentativa</th><th>Erro</th></tr>
       ${data.items.map((j) => `<tr><td>${j.id}</td><td>${esc(PLAT[j.platform])}</td><td>${esc(j.sku)}</td><td>${esc(j.status)}</td>
         <td class="num">${j.attempts}</td><td>${j.status === 'queued' ? when(j.run_after) : '—'}</td><td class="lvl-error">${esc(j.error || '')}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Fila vazia.</td></tr>'}</table></div>`;
-    el.querySelector('#j-clear').onclick = async () => { await api('/api/jobs/clear', { method: 'POST' }); drawSub(); };
+    el.querySelector('#j-clear').onclick = (e) => busy(e.target, async () => { await api('/api/jobs/clear', { method: 'POST' }); await drawSub(); });
     return;
   }
   if (s.tab === 'log') {
     const rows = await api('/api/logs');
     el.innerHTML = `<div class="table-wrap"><table><tr><th>Quando</th><th>Nível</th><th>Destino</th><th>SKU</th><th>Mensagem</th></tr>
-      ${rows.map((l) => `<tr class="lvl-${l.level}"><td class="nowrap">${when(l.ts)}</td><td>${esc(l.level)}</td><td>${esc(PLAT_SHORT[l.platform] || '')}</td>
+      ${rows.map((l) => `<tr class="lvl-${esc(l.level)}"><td class="nowrap">${when(l.ts)}</td><td>${esc(l.level)}</td><td>${esc(PLAT_SHORT[l.platform] || '')}</td>
         <td>${esc(l.sku || '')}</td><td>${esc(l.message)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Sem eventos.</td></tr>'}</table></div>`;
     return;
   }
@@ -1496,7 +1531,7 @@ async function drawSub(silent) {
       <div id="sbar"></div>`;
     el.querySelectorAll('[data-status]').forEach((b) => { b.onclick = () => { s.status = b.dataset.status; drawSub(); }; });
     let t;
-    el.querySelector('#sq').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { s.q = e.target.value; drawSub(); }, 350); };
+    el.querySelector('#sq').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { s.q = e.target.value; drawSub(true).catch((err) => toast(err.message, true)); }, 350); };
     el.querySelector('#sp').onchange = (e) => { s.platform = e.target.value; drawSub(); };
   } else {
     el.querySelectorAll('[data-status]').forEach((b, i) => { b.querySelector('b').textContent = tiles[i][2]; });
@@ -1504,6 +1539,9 @@ async function drawSub(silent) {
   }
   el.querySelector('#scount').textContent = `${data.total} vínculos produto × destino`;
   const key = (r) => `${r.platform}|${r.sku}`;
+  // A seleção só vale para o que está na tela (nada escondido por filtro/busca).
+  const visible = new Set(data.items.map(key));
+  for (const k of [...s.picked]) if (!visible.has(k)) s.picked.delete(k);
   el.querySelector('#grid').innerHTML = `
     <tr><th></th><th>Produto</th><th>Destino</th><th>Status</th><th>ID no marketplace</th><th class="num">Preço</th><th class="num">Estoque</th><th class="num">Var.</th>
     <th>Atualizado na origem</th><th>Última sincronização</th><th>Mensagem</th></tr>
@@ -1543,7 +1581,7 @@ function drawSyncBar() {
     <button id="s-resend" class="primary">Reenviar agora</button></div>`;
   const group = () => {
     const by = {};
-    for (const k of s.picked) { const [pid, sku] = k.split('|'); (by[pid] ||= []).push(sku); }
+    for (const k of s.picked) { const i = k.indexOf('|'); (by[k.slice(0, i)] ||= []).push(k.slice(i + 1)); }
     return by;
   };
   bar.querySelector('#s-clear').onclick = () => { s.picked.clear(); drawSub(); };
@@ -1633,7 +1671,7 @@ async function openDetail(sku) {
 
     <h4>Histórico</h4>
     <div class="table-wrap"><table><tr><th>Quando</th><th>Destino</th><th>Evento</th></tr>
-      ${d.logs.map((l) => `<tr class="lvl-${l.level}"><td class="nowrap">${when(l.ts)}</td><td>${esc(PLAT_SHORT[l.platform] || '')}</td><td>${esc(l.message)}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">Sem eventos.</td></tr>'}
+      ${d.logs.map((l) => `<tr class="lvl-${esc(l.level)}"><td class="nowrap">${when(l.ts)}</td><td>${esc(PLAT_SHORT[l.platform] || '')}</td><td>${esc(l.message)}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">Sem eventos.</td></tr>'}
     </table></div>`;
   document.querySelectorAll('[data-resend]').forEach((b) => {
     b.onclick = () => busy(b, async () => {
@@ -1675,7 +1713,8 @@ document.getElementById('btn-logout').onclick = async () => { await api('/api/lo
     if (!st.installed) return showInstall();
     await api('/api/me');
     startApp(start);
-  } catch {
-    /* api() já levou para o login em caso de 401 */
+  } catch (e) {
+    // 401: api() já levou para o login. Qualquer outro erro (servidor fora) aparece na tela.
+    if (!/Sessão|Faça login/.test(e.message)) $app.innerHTML = `<p class="lvl-error center">Não consegui falar com o servidor: ${esc(e.message)}</p>`;
   }
 })();

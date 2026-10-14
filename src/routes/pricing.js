@@ -48,8 +48,8 @@ function register(r, { requireAdmin }) {
   }));
 
   // Grade comparativa. Sem skus: os 200 produtos mais recentes.
-  r.get('/api/pricing', requireAdmin, async (ctx) => {
-    let skus = list(ctx.url.searchParams.get('skus'));
+  const grid = (skusIn) => {
+    let skus = list(skusIn).slice(0, 5000);
     if (!skus.length) skus = store.listProducts({ limit: 200 }).items.map((i) => i.sku);
     const cfg = pricing.getSettings();
     const res = store.researchFor(skus);
@@ -65,7 +65,10 @@ function register(r, { requireAdmin }) {
       sources: { total: cfg.sources.length, active: cfg.sources.filter((s) => s.enabled !== false).length },
       items, research: research.status(),
     };
-  });
+  };
+  r.get('/api/pricing', requireAdmin, async (ctx) => grid(ctx.url.searchParams.get('skus')));
+  // Com muitos SKUs escolhidos, a lista não cabe na URL: vai no corpo.
+  r.post('/api/pricing/grid', requireAdmin, async (ctx) => grid((await readJson(ctx.req)).skus));
 
   r.post('/api/pricing/research', requireAdmin, wrap(async (ctx) => {
     const { skus } = await readJson(ctx.req);
