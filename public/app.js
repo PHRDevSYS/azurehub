@@ -61,6 +61,7 @@ function dialog(title, html, okLabel = 'Salvar') {
   document.getElementById('dlg-title').textContent = title;
   document.getElementById('dlg-body').innerHTML = html;
   document.getElementById('dlg-ok').textContent = okLabel;
+  dlg.returnValue = '';
   dlg.showModal();
   return new Promise((resolve) => {
     dlg.onclose = () => {
@@ -244,6 +245,11 @@ async function showApiKey(key, title) {
 
 // ================================================================= login
 function showLogin() {
+  clearInterval(refreshTimer);
+  clearInterval(state.pricing.poll);
+  clearTimeout(state.ugc && state.ugc.poll);
+  for (const id of ['drawer', 'dlg']) { const d = document.getElementById(id); if (d && d.open) d.close(); }
+  if (document.getElementById('login')) return; // já está na tela de entrada
   document.getElementById('btn-logout').classList.add('hidden');
   document.getElementById('nav').classList.add('hidden');
   $app.innerHTML = `<div class="narrow"><div class="panel"><h1>Entrar</h1>
@@ -271,7 +277,9 @@ function startApp(view) {
   else route();
 }
 
+let routeSeq = 0;
 async function route() {
+  const mine = ++routeSeq;
   const view = VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : 'produtos';
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.view === view));
   clearInterval(refreshTimer);
@@ -282,9 +290,10 @@ async function route() {
   try {
     [state.platforms, state.modules] = await Promise.all([api('/api/platforms'), api('/api/modules')]);
     document.getElementById('nav-pricing').classList.toggle('hidden', !state.modules.pricing);
+    if (mine !== routeSeq) return;
     await VIEWS[view]();
   } catch (e) {
-    if (!/Sessão|Faça login/.test(e.message)) $app.innerHTML = `<p class="lvl-error">${esc(e.message)}</p>`;
+    if (mine === routeSeq && !/Sessão|Faça login/.test(e.message)) $app.innerHTML = `<p class="lvl-error">${esc(e.message)}</p>`;
   }
 }
 window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#oauth')) route(); });
@@ -424,7 +433,7 @@ async function renderCards() {
       const act = b.dataset.act;
       if (act === 'enable') {
         b.onchange = async () => {
-          try { await api(`/api/platforms/${p.id}/enable`, { method: 'POST', body: { enabled: b.checked } }); toast(b.checked ? `${p.name} ativo` : `${p.name} pausado`); renderCards(); } catch (e) { toast(e.message, true); }
+          try { await api(`/api/platforms/${p.id}/enable`, { method: 'POST', body: { enabled: b.checked } }); toast(b.checked ? `${p.name} ativo` : `${p.name} pausado`); renderCards(); } catch (e) { b.checked = !b.checked; toast(e.message, true); }
         };
         return;
       }
@@ -488,9 +497,11 @@ async function viewProdutos() {
 
 async function loadProducts(reset) {
   const pr = state.products;
-  if (reset) pr.items = [];
-  const data = await api(`/api/products?limit=100&offset=${pr.items.length}&q=${encodeURIComponent(pr.q)}&filter=${pr.filter}`);
-  pr.items.push(...data.items);
+  const gen = reset ? (pr.gen = (pr.gen || 0) + 1) : pr.gen;
+  const offset = reset ? 0 : pr.items.length;
+  const data = await api(`/api/products?limit=100&offset=${offset}&q=${encodeURIComponent(pr.q)}&filter=${pr.filter}`);
+  if (gen !== pr.gen) return; // chegou depois de outra busca: descarta
+  pr.items = reset ? data.items : [...pr.items, ...data.items];
   pr.total = data.total;
   drawProducts();
 }
@@ -589,7 +600,7 @@ function drawActionBar() {
 // (teto) com o mercado e define o preço de venda, por produto ou em massa.
 const brNum = (v) => Number(v).toFixed(2).replace('.', ',');
 // "1.234,56", "1234,56" e "1234.56" → 1234.56
-const parseBr = (v) => { const t = String(v).trim().replace(/[R$\s]/g, ''); return Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t); };
+const parseBr = (v) => { const t = String(v).trim().replace(/[R$\s]/g, ''); return Number(t.includes(',') || /^\d{1,3}(\.\d{3})+$/.test(t) ? t.replace(/\./g, '').replace(',', '.') : t); };
 const pct = (v) => `${v > 0 ? '+' : ''}${Number(v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%`;
 // Tem preço de venda definido ("origem" = segue a origem, sem número gravado).
 const hasSale = (r) => r.price !== null || r.strategy === 'origem';
@@ -1027,13 +1038,14 @@ async function viewPrevia() {
     return;
   }
   if (!state.preview || state.preview.key !== key) {
-    state.preview = { key, items: [], include: {}, tab: {}, audits: {} };
+    const pv = state.preview = { key, items: [], include: {}, tab: {}, audits: {} };
     for (let i = 0; i < skus.length; i += 5) {
-      if (!state.preview || state.preview.key !== key) return;
+      if (state.preview !== pv) return;
       const res = await api('/api/preview', { method: 'POST', body: { skus: skus.slice(i, i + 5), platforms: targets } });
+      if (state.preview !== pv) return; // trocou de destino durante o cálculo
       for (const it of res.items) {
-        state.preview.items.push(it);
-        for (const [pid, r] of Object.entries(it.platforms)) state.preview.include[`${it.sku}|${pid}`] = r.ready && r.enabled && r.connected;
+        pv.items.push(it);
+        for (const [pid, r] of Object.entries(it.platforms)) pv.include[`${it.sku}|${pid}`] = r.ready && r.enabled && r.connected;
       }
       drawPreview(skus.length, targets);
     }
@@ -1436,6 +1448,8 @@ async function viewSincronizacao() {
   document.getElementById('auto').onchange = (e) => { s.auto = e.target.checked; };
   document.getElementById('refresh').onclick = () => drawSub();
   await drawSub();
+  if (location.hash !== '#sincronizacao') return;
+  clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
     if (s.auto && !document.getElementById('drawer').open && location.hash === '#sincronizacao') drawSub(true).catch(() => {});
   }, 10000);
