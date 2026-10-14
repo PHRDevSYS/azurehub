@@ -271,8 +271,8 @@ function register(r) {
   r.get('/api/products', requireAdmin, async (ctx) => {
     const q = ctx.url.searchParams;
     const data = store.listProducts({
-      limit: Math.min(500, Number(q.get('limit') || 100)),
-      offset: Number(q.get('offset') || 0),
+      limit: Math.min(500, Math.max(1, Math.floor(Number(q.get('limit'))) || 100)),
+      offset: Math.min(1e6, Math.max(0, Math.floor(Number(q.get('offset'))) || 0)),
       search: q.get('q') || '',
       filter: q.get('filter') || 'all',
     });
@@ -337,8 +337,8 @@ function register(r) {
   r.get('/api/sync', requireAdmin, async (ctx) => {
     const q = ctx.url.searchParams;
     const data = store.listSync({
-      limit: Math.min(500, Number(q.get('limit') || 100)),
-      offset: Number(q.get('offset') || 0),
+      limit: Math.min(500, Math.max(1, Math.floor(Number(q.get('limit'))) || 100)),
+      offset: Math.min(1e6, Math.max(0, Math.floor(Number(q.get('offset'))) || 0)),
       search: q.get('q') || '',
       platform: q.get('platform') || '',
       status: q.get('status') || '',

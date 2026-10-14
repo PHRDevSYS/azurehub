@@ -114,7 +114,12 @@ async function testSource(cfg) {
 
 // Grava produtos no hub. Enfileira apenas os destinos em que o produto foi
 // selecionado (e os pedidos em `sendTo`, que passam a ficar selecionados).
-function ingest(rawProducts, origin, { sendTo = [] } = {}) {
+function ingest(rawProducts, origin, opts = {}) {
+  // Uma transação por lote: um fsync em vez de dezenas de milhares.
+  return store.transaction(() => ingestRows(rawProducts, origin, opts));
+}
+
+function ingestRows(rawProducts, origin, { sendTo = [] } = {}) {
   const out = { received: rawProducts.length, changed: 0, unchanged: 0, invalid: [], queued: 0 };
   const enabled = require('../platforms').ids().filter(store.isEnabled);
   for (const raw of rawProducts) {
@@ -156,8 +161,9 @@ function deactivateMissing(origin, rows) {
   const seen = new Set(rows.map((r) => normalizeProduct(r).sku));
   const enabled = require('../platforms').ids().filter(store.isEnabled);
   let n = 0;
-  for (const { sku, data } of store.productsByOrigin(origin)) {
-    if (seen.has(sku) || data.active === false) continue;
+  for (const sku of store.skusByOrigin(origin)) {
+    if (seen.has(sku)) continue;
+    const data = store.getProduct(sku).data;
     const p = { ...data, active: false, stock: 0, variants: (data.variants || []).map((v) => ({ ...v, stock: 0, active: false })) };
     if (store.upsertProduct(p, productHash(p), origin)) {
       n++;

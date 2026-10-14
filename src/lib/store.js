@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status, run_after);
+CREATE INDEX IF NOT EXISTS jobs_target ON jobs(platform, sku, status);
+CREATE INDEX IF NOT EXISTS listings_sku ON listings(sku);
+CREATE INDEX IF NOT EXISTS products_updated ON products(updated_at);
 CREATE TABLE IF NOT EXISTS logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -109,7 +112,7 @@ const now = () => new Date().toISOString();
 function open(file = config.dbFile) {
   if (db) return db;
   db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
   migrate();
   return db;
@@ -144,11 +147,39 @@ const syncHashOf = (row) => row.sync_hash || row.hash;
 function close() {
   if (db) db.close();
   db = null;
+  stmts = new Map();
 }
 
-const get = (sql, ...a) => open().prepare(sql).get(...a);
-const all = (sql, ...a) => open().prepare(sql).all(...a);
-const run = (sql, ...a) => open().prepare(sql).run(...a);
+// Comandos preparados ficam guardados por SQL (a captura roda centenas de
+// milhares de consultas iguais).
+let stmts = new Map();
+function stmt(sql) {
+  const d = open();
+  let st = stmts.get(sql);
+  if (!st) {
+    if (stmts.size > 300) stmts.clear();
+    st = d.prepare(sql);
+    stmts.set(sql, st);
+  }
+  return st;
+}
+const get = (sql, ...a) => stmt(sql).get(...a);
+const all = (sql, ...a) => stmt(sql).all(...a);
+const run = (sql, ...a) => stmt(sql).run(...a);
+
+// Várias escritas numa transação só (um fsync em vez de um por comando).
+function transaction(fn) {
+  const d = open();
+  d.exec('BEGIN');
+  try {
+    const out = fn();
+    d.exec('COMMIT');
+    return out;
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+}
 
 // ---------- settings ----------
 function getSetting(key, fallback = null) {
@@ -214,6 +245,9 @@ function upsertProduct(product, hash, origin) {
   return true;
 }
 // SKUs (e dados) de uma origem: usados para notar quem sumiu da captura.
+function skusByOrigin(origin) {
+  return all(`SELECT sku FROM products WHERE origin = ? AND json_extract(data, '$.active') IS NOT 0`, origin).map((r) => r.sku);
+}
 function productsByOrigin(origin) {
   return all('SELECT sku, data FROM products WHERE origin = ?', origin).map((r) => ({ sku: r.sku, data: JSON.parse(r.data) }));
 }
@@ -455,6 +489,10 @@ function jobStats() {
   const rows = all('SELECT status, COUNT(*) AS n FROM jobs GROUP BY status');
   return Object.fromEntries(rows.map((r) => [r.status, r.n]));
 }
+// Jobs concluídos há mais de `days` dias saem da tabela.
+function pruneJobs(days = 14) {
+  run(`DELETE FROM jobs WHERE status = 'done' AND updated_at < ?`, new Date(Date.now() - days * 86400e3).toISOString());
+}
 function clearFinishedJobs() {
   run(`DELETE FROM jobs WHERE status = 'done'`);
 }
@@ -505,7 +543,7 @@ function consumeOAuthState(state) {
 
 module.exports = {
   open, close, now,
-  getSetting, setSetting, getSecretSetting, setSecretSetting, productsByOrigin,
+  getSetting, setSetting, getSecretSetting, setSecretSetting, productsByOrigin, skusByOrigin, transaction, pruneJobs,
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
   upsertProduct, getProduct, listProducts, listSync, deleteProduct, refreshSyncHash, syncHashOf,
   getPricing, pricingFor, setPricing, getResearch, researchFor, saveResearch, refreshAllSyncHashes,

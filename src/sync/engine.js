@@ -81,7 +81,9 @@ async function processJob(job) {
   }
 }
 
+let lastPrune = 0;
 function tick() {
+  if (Date.now() - lastPrune > 3600e3) { lastPrune = Date.now(); try { store.pruneJobs(); } catch { /* tenta na próxima hora */ } }
   for (const platform of platforms.ids()) {
     if (busy.has(platform) || !store.isEnabled(platform)) continue;
     const job = nextFor(platform);
