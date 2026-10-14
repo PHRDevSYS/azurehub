@@ -12,6 +12,13 @@ const busy = new Set();
 let timer = null;
 let autoImportTimer = null;
 
+// Fim da promoção criada na plataforma (ms), se houver.
+function promoEndMs(meta) {
+  const e = meta && meta.promo && Number(meta.promo.end);
+  if (!e) return 0;
+  return e < 1e12 ? e * 1000 : e;
+}
+
 async function processJob(job) {
   const { platform, sku } = job;
   const product = store.getProduct(sku);
@@ -25,7 +32,8 @@ async function processJob(job) {
     return;
   }
   const syncHash = store.syncHashOf(product);
-  if (listing.status === 'synced' && listing.last_hash === syncHash) {
+  const promoOver = promoEndMs(listing.meta) && promoEndMs(listing.meta) <= Date.now();
+  if (listing.status === 'synced' && listing.last_hash === syncHash && !promoOver) {
     store.finishJob(job.id, 'done', 'sem alterações');
     return;
   }
@@ -35,6 +43,12 @@ async function processJob(job) {
     const res = await ctx.platform.publish(ctx, pricing.effectiveProduct(product.data), listing);
     // Sem externalId = a plataforma adiou a criação (ex.: TikTok sem estoque).
     // followUpMs = há etapa pendente (ex.: vídeo transcodificando): volta à fila.
+    // Preço recusado (promoção ativa na plataforma): volta à fila em 30 min, até
+    // 6 vezes, em vez de dar o anúncio por sincronizado com o preço antigo.
+    const priceStuck = res.warnings.some((w) => /^Preço não atualizado/.test(w));
+    const tries = Number((listing.meta || {}).price_retries) || 0;
+    res.meta = { ...res.meta, price_retries: priceStuck ? tries + 1 : 0 };
+    if (priceStuck && tries < 6 && !res.followUpMs) res.followUpMs = 30 * 60e3;
     // Se o usuário parou de sincronizar enquanto o envio rodava, o anúncio
     // criado/atualizado continua vinculado, mas pausado.
     const after = store.getListing(platform, sku);
@@ -45,6 +59,9 @@ async function processJob(job) {
       meta: res.meta, last_error: res.warnings.length ? res.warnings.join(' | ') : null, last_sync: store.now(),
     });
     store.finishJob(job.id, 'done');
+    // A campanha acaba: um novo envio no fim encerra (ou renova) a promoção.
+    const endMs = promoEndMs(res.meta);
+    if (endMs > Date.now() && !stopped && !res.followUpMs) store.enqueue(platform, sku, endMs - Date.now() + 60e3);
     if (res.followUpMs && !stopped) store.enqueue(platform, sku, res.followUpMs);
     if (res.externalId) store.log('info', `${listing && listing.external_id ? 'Atualizado' : 'Publicado'} → ${res.externalId}`, { platform, sku });
     for (const w of res.warnings) store.log('warn', w, { platform, sku });

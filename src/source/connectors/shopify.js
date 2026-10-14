@@ -9,12 +9,16 @@
 const { requestJson, PlatformError } = require('../../lib/media');
 const { timing, toKg } = require('../http');
 
+// Estoque não rastreado na Shopify = venda sem limite: vai com um saldo alto, não 0.
+const UNTRACKED_STOCK = 999;
+const stockOf = (v) => (v.inventoryItem && v.inventoryItem.tracked === false ? UNTRACKED_STOCK : Math.max(0, v.inventoryQuantity || 0));
+
 const VARIANT_FIELDS = `
   sku price compareAtPrice inventoryQuantity
   selectedOptions { name value }
   barcodes(first: 1) { nodes { value } }
   media(first: 1) { nodes { ... on MediaImage { image { url } } } }
-  inventoryItem { measurement { weight { unit value } } }`;
+  inventoryItem { tracked measurement { weight { unit value } } }`;
 
 const PRODUCTS_QUERY = `query Produtos($cursor: String, $query: String) {
   products(first: 2, after: $cursor, query: $query) {
@@ -104,7 +108,7 @@ function mapProduct(p, variants) {
   if (simple) {
     Object.assign(out, priceOf(first), {
       sku: first.sku || `SHOPIFY-${numericId(p.id)}`,
-      stock: Math.max(0, first.inventoryQuantity || 0),
+      stock: stockOf(first),
       gtin: ((first.barcodes || {}).nodes || [])[0] ? first.barcodes.nodes[0].value : null,
       weightKg: weightOf(first),
     });
@@ -116,7 +120,7 @@ function mapProduct(p, variants) {
         sku: v.sku || `SHOPIFY-${numericId(p.id)}-${(v.selectedOptions || []).map((o) => o.value).join('-')}`,
         options: Object.fromEntries((v.selectedOptions || []).map((o) => [o.name, o.value])),
         ...priceOf(v),
-        stock: Math.max(0, v.inventoryQuantity || 0),
+        stock: stockOf(v),
         gtin: ((v.barcodes || {}).nodes || [])[0] ? v.barcodes.nodes[0].value : null,
         images: ((v.media || {}).nodes || []).filter((m) => m.image).map((m) => m.image.url).slice(0, 1),
       })),

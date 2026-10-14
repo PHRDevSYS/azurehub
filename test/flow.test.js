@@ -180,3 +180,45 @@ test('motor: falha parcial guarda o id externo e follow-up volta à fila', async
     ml.publish = original;
   }
 });
+
+test('motor: parada durante o envio, preço recusado e fim de promoção', async () => {
+  const ml = require('../src/platforms').REGISTRY.mercadolivre;
+  const original = ml.publish;
+  const run = async () => {
+    const id = store.enqueue('mercadolivre', 'CAM-1');
+    await engine.processJob({ ...store.open().prepare('SELECT * FROM jobs WHERE id = ?').get(id), attempts: 1 });
+  };
+  const queued = () => store.open().prepare(`SELECT * FROM jobs WHERE platform = 'mercadolivre' AND sku = 'CAM-1' AND status = 'queued'`).all();
+  try {
+    // Parar de sincronizar no meio do envio: o anúncio fica pausado, não "synced".
+    store.open().prepare(`DELETE FROM listings WHERE platform = 'mercadolivre' AND sku = 'CAM-1'`).run();
+    store.selectForPlatform('mercadolivre', 'CAM-1');
+    store.saveListing('mercadolivre', 'CAM-1', { external_id: 'MLB-1', status: 'synced', last_hash: null });
+    ml.publish = async () => { store.unselect('mercadolivre', 'CAM-1'); return { externalId: 'MLB-1', meta: {}, warnings: [] }; };
+    await run();
+    assert.equal(store.getListing('mercadolivre', 'CAM-1').status, 'paused');
+
+    // Preço recusado pela plataforma: não fica "sincronizado", volta à fila.
+    store.selectForPlatform('mercadolivre', 'CAM-1');
+    store.open().prepare(`DELETE FROM jobs WHERE platform = 'mercadolivre' AND sku = 'CAM-1'`).run();
+    ml.publish = async () => ({ externalId: 'MLB-1', meta: {}, warnings: ['Preço não atualizado (promoção ativa?): x'] });
+    await run();
+    assert.equal(store.getListing('mercadolivre', 'CAM-1').last_hash, null, 'não conta como sincronizado');
+    assert.equal(queued().length, 1, 'nova tentativa agendada');
+    assert.equal(store.getListing('mercadolivre', 'CAM-1').meta.price_retries, 1);
+
+    // Promoção que termina: o envio é agendado para o fim e roda mesmo sem alteração.
+    store.open().prepare(`DELETE FROM jobs WHERE platform = 'mercadolivre' AND sku = 'CAM-1'`).run();
+    const end = Math.floor(Date.now() / 1000) + 3600;
+    ml.publish = async () => ({ externalId: 'MLB-1', meta: { promo: { end } }, warnings: [] });
+    await run();
+    assert.ok(queued().some((j) => new Date(j.run_after) > new Date(Date.now() + 3000e3)), 'agendado para o fim da campanha');
+    store.saveListing('mercadolivre', 'CAM-1', { meta: { promo: { end: Math.floor(Date.now() / 1000) - 10 } } });
+    let called = 0;
+    ml.publish = async () => { called++; return { externalId: 'MLB-1', meta: { promo: null }, warnings: [] }; };
+    await run();
+    assert.equal(called, 1, 'promoção vencida força o envio');
+  } finally {
+    ml.publish = original;
+  }
+});
