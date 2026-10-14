@@ -35,13 +35,17 @@ async function processJob(job) {
     const res = await ctx.platform.publish(ctx, pricing.effectiveProduct(product.data), listing);
     // Sem externalId = a plataforma adiou a criação (ex.: TikTok sem estoque).
     // followUpMs = há etapa pendente (ex.: vídeo transcodificando): volta à fila.
+    // Se o usuário parou de sincronizar enquanto o envio rodava, o anúncio
+    // criado/atualizado continua vinculado, mas pausado.
+    const after = store.getListing(platform, sku);
+    const stopped = !after || after.status === 'paused';
     store.saveListing(platform, sku, {
-      external_id: res.externalId, status: res.externalId ? 'synced' : 'skipped',
+      external_id: res.externalId, status: stopped && res.externalId ? 'paused' : res.externalId ? 'synced' : 'skipped',
       last_hash: res.followUpMs ? null : syncHash,
       meta: res.meta, last_error: res.warnings.length ? res.warnings.join(' | ') : null, last_sync: store.now(),
     });
     store.finishJob(job.id, 'done');
-    if (res.followUpMs) store.enqueue(platform, sku, res.followUpMs);
+    if (res.followUpMs && !stopped) store.enqueue(platform, sku, res.followUpMs);
     if (res.externalId) store.log('info', `${listing && listing.external_id ? 'Atualizado' : 'Publicado'} → ${res.externalId}`, { platform, sku });
     for (const w of res.warnings) store.log('warn', w, { platform, sku });
   } catch (e) {

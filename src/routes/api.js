@@ -241,9 +241,11 @@ function register(r) {
     const { enabled } = await readJson(ctx.req);
     store.setEnabled(p.id, !!enabled);
     if (enabled) {
-      // Produtos já selecionados para este destino e ainda não enviados entram na fila.
+      // Tudo o que está selecionado entra na fila: o que ainda não foi enviado e
+      // o que mudou enquanto o destino esteve desligado (sem mudança, o motor
+      // encerra o job como "sem alterações").
       const pending = store.open().prepare(
-        `SELECT sku FROM listings WHERE platform = ? AND status IN ('pending', 'error', 'skipped')`,
+        `SELECT sku FROM listings WHERE platform = ? AND status != 'paused'`,
       ).all(p.id);
       for (const row of pending) store.enqueue(p.id, row.sku);
     }

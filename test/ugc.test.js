@@ -366,3 +366,18 @@ test('arquivo devolvido pelo provedor que não é imagem nunca é gravado nem se
   const media = await call('GET', now.especificacoes.previous.url);
   assert.equal(media.type, 'image/png');
 });
+
+test('não enfileira a mesma mídia duas vezes e a persona só espera a foto que entrou antes', async () => {
+  const id = store.ugcInsert({ sku: 'COP', kind: 'posse', gender: 'masculino', provider: 'fake', model: 'img-1', prompt: 'x'.repeat(30), status: 'running' });
+  const r = await call('POST', '/api/ugc/COP/generate', { gender: 'masculino', items: [{ kind: 'posse', prompt: 'Influencer segurando o copo térmico, foto vertical.' }] });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /em andamento/);
+  store.ugcUpdate(id, { status: 'error', error: 'x' });
+
+  const first = store.ugcInsert({ sku: 'COP', kind: 'uso', gender: 'masculino', provider: 'fake', model: 'img-1', prompt: 'x'.repeat(30), status: 'running' });
+  const later = store.ugcInsert({ sku: 'COP', kind: 'uso', gender: 'masculino', provider: 'fake', model: 'img-1', prompt: 'x'.repeat(30), status: 'queued' });
+  assert.equal(store.ugcPendingUso('COP', 'masculino', later).id, first, 'a anterior ainda gera: espera');
+  assert.equal(store.ugcPendingUso('COP', 'masculino', first), null, 'a mais nova não trava a mais antiga');
+  store.ugcUpdate(first, { status: 'error', error: 'x' });
+  store.ugcUpdate(later, { status: 'error', error: 'x' });
+});

@@ -368,6 +368,10 @@ function ugcLatestOf(sku, kind, { status, gender } = {}) {
   if (gender) { where.push('gender = ?'); args.push(gender); }
   return get(`SELECT * FROM ugc_media WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT 1`, ...args) || null;
 }
+// Foto 1 do mesmo gênero que entrou na fila antes de `beforeId` e ainda não terminou.
+const ugcPendingUso = (sku, gender, beforeId) => get(`SELECT id FROM ugc_media WHERE sku = ? AND kind = 'uso' AND gender = ? AND id < ? AND status IN ('queued','running') LIMIT 1`, sku, gender, beforeId) || null;
+// Já existe geração desta mídia aguardando ou rodando?
+const ugcInFlight = (sku, kind, gender) => get(`SELECT id FROM ugc_media WHERE sku = ? AND kind = ? AND gender = ? AND status IN ('queued','running') LIMIT 1`, sku, kind, gender) || null;
 const ugcHistory = (sku, limit = 40) => all('SELECT * FROM ugc_media WHERE sku = ? ORDER BY id DESC LIMIT ?', sku, limit);
 const ugcActive = () => all(`SELECT * FROM ugc_media WHERE status IN ('queued', 'running') ORDER BY id`);
 
@@ -505,7 +509,7 @@ module.exports = {
   platformRow, ensurePlatform, getCredentials, setCredentials, getTokens, setTokens, setEnabled, isEnabled,
   upsertProduct, getProduct, listProducts, listSync, deleteProduct, refreshSyncHash, syncHashOf,
   getPricing, pricingFor, setPricing, getResearch, researchFor, saveResearch, refreshAllSyncHashes,
-  ugcInsert, ugcUpdate, ugcGet, ugcLatest, ugcLastDone, ugcLatestOf, ugcHistory, ugcActive, getAudit, saveAudit,
+  ugcInsert, ugcUpdate, ugcGet, ugcLatest, ugcLastDone, ugcLatestOf, ugcPendingUso, ugcInFlight, ugcHistory, ugcActive, getAudit, saveAudit,
   getListing, saveListing, listingStats, selectForPlatform, unselect, selectedSkus, syncCounts,
   enqueue, finishJob, resetStuckJobs, listJobs, jobStats, clearFinishedJobs,
   log, listLogs, jobsFor,

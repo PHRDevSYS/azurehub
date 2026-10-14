@@ -112,9 +112,8 @@ function save(item, buffer, claimed) {
 async function persona(item, accept = COMMON_MIMES) {
   const started = Date.now();
   for (;;) {
-    const uso = store.ugcLatestOf(item.sku, 'uso');
     // Só espera a que entrou antes na fila (já está gerando): sem risco de travar.
-    const pending = uso && uso.id < item.id && uso.gender === item.gender && ['queued', 'running'].includes(uso.status);
+    const pending = store.ugcPendingUso(item.sku, item.gender, item.id);
     if (!pending || Date.now() - started > timing.personaWaitMs) break;
     await timing.sleep(timing.pollMs);
   }
@@ -161,8 +160,17 @@ async function work(id) {
     store.ugcUpdate(id, { job: String(job) });
   }
   const started = Date.now();
+  let pollErrors = 0;
   for (;;) {
-    const st = await retrying(() => provider.checkVideo(cfg, job));
+    // O vídeo já existe (e foi cobrado) no provedor: falha de rede ou 5xx na
+    // consulta não o descarta; só um erro definitivo (chave, 4xx) encerra.
+    let st;
+    try {
+      st = await retrying(() => provider.checkVideo(cfg, job));
+    } catch (e) {
+      if (!(e && e.retryable) || ++pollErrors > 20) throw e;
+      st = { status: 'running' };
+    }
     if (st.status === 'done') { save(item, st.buffer, st.mime || 'video/mp4'); return; }
     if (st.status === 'error') throw new Error(st.error || 'o provedor não conseguiu gerar o vídeo');
     if (Date.now() - started > timing.maxWaitMs) throw new Error('o vídeo não ficou pronto a tempo; gere de novo');
@@ -179,6 +187,9 @@ function generate({ sku, gender, items }) {
     const { provider, model } = ai.resolve('midia', it.kind === 'video' ? 'video' : 'image');
     return { ...it, provider: provider.id, model };
   });
+  for (const it of plan) {
+    if (store.ugcInFlight(sku, it.kind, gender)) throw new Error('Já existe uma geração desta mídia em andamento; aguarde terminar');
+  }
   return plan.map((it) => {
     const id = store.ugcInsert({ sku, kind: it.kind, gender, provider: it.provider, model: it.model, prompt: it.prompt, status: 'queued' });
     enqueue(id, it.kind);

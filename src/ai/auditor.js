@@ -7,6 +7,7 @@ const store = require('../lib/store');
 const ai = require('./settings');
 const { facts } = require('./facts');
 const { previewProducts } = require('../sync/preview');
+const pricing = require('../pricing');
 
 const PLATFORMS = { mercadolivre: 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok Shop' };
 const TITLE_MAX = { mercadolivre: 60, shopee: 120, tiktok: 255 };
@@ -52,11 +53,12 @@ async function audit(sku, requested) {
   const platforms = (requested.length ? requested : Object.keys(PLATFORMS)).filter((id) => PLATFORMS[id]);
   if (!platforms.length) throw new Error('Escolha ao menos um marketplace para auditar');
   const prod = store.getProduct(sku);
+  const sold = pricing.effectiveProduct(prod.data); // preço como será enviado
   const { items: [pv] } = await previewProducts([sku], platforms);
   const brief = {
     produto: {
       ...facts(prod.data, { descriptionMax: 3000 }),
-      sku, gtin: prod.data.gtin || null, preco: prod.data.price, preco_promocional: prod.data.promoPrice || null,
+      sku, gtin: prod.data.gtin || null, preco: sold.price, preco_promocional: sold.promoPrice || null,
       estoque: prod.data.stock, fotos: (prod.data.images || []).length, videos: (prod.data.videos || []).length,
       variacoes: (prod.data.variants || []).length,
     },

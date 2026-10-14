@@ -84,6 +84,11 @@ module.exports = {
       p.gtin ? { id: 'GTIN', value_name: String(p.gtin) } : { id: 'EMPTY_GTIN_REASON', value_id: '17055160' }]; // 17055160 = "O produto não tem código cadastrado"
     const stock = p.active ? p.stock : 0;
 
+    if (!itemId && stock <= 0) {
+      // O ML recusa criar anúncio com estoque 0: espera o produto ter estoque.
+      warnings.push('Sem estoque (ou inativo): o anúncio será criado quando houver estoque');
+      return { externalId: null, meta, warnings };
+    }
     if (!itemId) {
       const body = {
         title: p.title.slice(0, 60),
@@ -115,8 +120,12 @@ module.exports = {
       itemId = item.id;
       meta.permalink = item.permalink;
       meta.category_id = categoryId;
-      if (p.description) {
-        await api(ctx, 'POST', `/items/${itemId}/description`, { plain_text: plainText(p.description) });
+      try {
+        if (p.description) await api(ctx, 'POST', `/items/${itemId}/description`, { plain_text: plainText(p.description) });
+      } catch (e) {
+        // O anúncio já existe: guarda o id para a nova tentativa não duplicar.
+        e.partial = { externalId: itemId, meta };
+        throw e;
       }
     } else {
       // Título não pode mudar depois da primeira venda — por isso não reenviamos.
@@ -129,7 +138,12 @@ module.exports = {
       Object.assign(meta, await syncStatus(ctx, itemId, p.active, prev, warnings));
     }
 
-    meta.promo = await syncDiscount(ctx, itemId, p.promoPrice, p, prev.promo, warnings);
+    try {
+      meta.promo = await syncDiscount(ctx, itemId, p.promoPrice, p, prev.promo, warnings);
+    } catch (e) {
+      if (!(listing && listing.external_id)) e.partial = { externalId: itemId, meta };
+      throw e;
+    }
     return { externalId: itemId, meta, warnings };
   },
 
@@ -403,7 +417,12 @@ async function classicVariations(ctx, p, listing, { categoryId, info, axes, pict
     itemId = item.id;
     meta.permalink = item.permalink;
     meta.variations = mapVariations(item.variations, p, axes, comboKey);
-    if (p.description) await api(ctx, 'POST', `/items/${itemId}/description`, { plain_text: plainText(p.description) });
+    try {
+      if (p.description) await api(ctx, 'POST', `/items/${itemId}/description`, { plain_text: plainText(p.description) });
+    } catch (e) {
+      e.partial = { externalId: itemId, meta };
+      throw e;
+    }
   } else {
     // PUT com TODAS as variações que ficam (com id); as omitidas são apagadas.
     const cur = await api(ctx, 'GET', `/items/${itemId}?include_attributes=all`);

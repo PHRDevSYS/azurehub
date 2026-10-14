@@ -507,7 +507,8 @@ async function updateVariants(ctx, p, listing) {
       const bad = new Set((res.errors || []).map((x) => String((x.detail || {}).sku_id)));
       failed = stockChanges.filter((v) => bad.has(skuIds[v.sku])).map((v) => v.sku);
     } catch (e) {
-      if (!zeros.size) throw e;
+      // Rede/limite/5xx não é recusa do estoque 0: tenta de novo depois.
+      if (!zeros.size || e.retryable) throw e;
       failed = stockChanges.map((v) => v.sku);
     }
     for (const v of stockChanges) if (!failed.includes(v.sku)) quantities[v.sku] = variantQty(p, v);
