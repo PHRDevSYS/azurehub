@@ -25,7 +25,7 @@ const lastByHost = new Map();
 const cache = new Map();
 const robotsCache = new Map();
 
-const { isPrivateAddress, resolver } = require('../lib/netguard');
+const { isPrivateAddress, resolver, guardedFetch } = require('../lib/netguard');
 
 // Liberado só por PRICE_ALLOW_PRIVATE=1 (ex.: loja de teste na rede local).
 const allowPrivate = () => process.env.PRICE_ALLOW_PRIVATE === '1';
@@ -68,7 +68,7 @@ async function rawGet(url, { headers = {}, timeoutMs = 20000 } = {}) {
     const u = await assertPublicUrl(current);
     let res;
     try {
-      res = await fetch(u.href, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/html;q=0.9, */*;q=0.5', 'Accept-Language': 'pt-BR,pt;q=0.9', ...headers }, signal, redirect: 'manual' });
+      res = await guardedFetch(u.href, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/html;q=0.9, */*;q=0.5', 'Accept-Language': 'pt-BR,pt;q=0.9', ...headers }, signal, allowPrivate: allowPrivate() });
     } catch (e) {
       throw new PriceSourceError(`falha de rede em ${u.host}: ${e.message}`);
     }

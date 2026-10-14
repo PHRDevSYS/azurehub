@@ -41,4 +41,46 @@ async function isInternalUrl(u) {
   return addrs.some((a) => isPrivateAddress(a.address));
 }
 
-module.exports = { isPrivateAddress, isInternalUrl, resolver, INTERNAL_NAME };
+// fetch que valida o endereço NO MOMENTO DA CONEXÃO: o nome é resolvido uma
+// vez e o socket usa exatamente aquele IP, então um DNS que muda de resposta
+// entre a checagem e o uso (DNS rebinding) não leva à rede interna.
+// Nos testes, global.fetch trocado continua valendo.
+const http = require('node:http');
+const https = require('node:https');
+const { Readable } = require('node:stream');
+const NATIVE_FETCH = global.fetch;
+
+function guardedLookup(allowPrivate) {
+  return (hostname, opts, cb) => {
+    if (typeof opts === 'function') { cb = opts; opts = {}; }
+    (net.isIP(hostname) ? Promise.resolve([{ address: hostname, family: net.isIPv4(hostname) ? 4 : 6 }]) : resolver.lookup(hostname))
+      .then((addrs) => {
+        if (!addrs.length) throw Object.assign(new Error(`sem endereço para ${hostname}`), { code: 'ENOTFOUND' });
+        if (!allowPrivate && addrs.some((a) => isPrivateAddress(a.address))) throw Object.assign(new Error(`endereço interno bloqueado: ${hostname}`), { code: 'EBLOCKED' });
+        if (opts && opts.all) cb(null, addrs.map((a) => ({ address: a.address, family: a.family || (net.isIPv4(a.address) ? 4 : 6) })));
+        else cb(null, addrs[0].address, addrs[0].family || (net.isIPv4(addrs[0].address) ? 4 : 6));
+      })
+      .catch((e) => cb(e));
+  };
+}
+
+function guardedFetch(href, { headers = {}, signal, allowPrivate = false } = {}) {
+  if (global.fetch !== NATIVE_FETCH) return global.fetch(href, { headers, signal, redirect: 'manual' });
+  return new Promise((ok, bad) => {
+    const u = new URL(href);
+    const lit = u.hostname.replace(/^\[|\]$/g, '');
+    // IP literal não passa pelo lookup: confere aqui.
+    if (!allowPrivate && net.isIP(lit) && isPrivateAddress(lit)) return bad(Object.assign(new Error(`endereço interno bloqueado: ${lit}`), { code: 'EBLOCKED' }));
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.request(u, { method: 'GET', headers, signal, lookup: guardedLookup(allowPrivate) }, (res) => {
+      const nobody = [204, 205, 304].includes(res.statusCode);
+      const h = new Headers();
+      for (const [k, v] of Object.entries(res.headers)) for (const x of [].concat(v)) h.append(k, x);
+      ok(new Response(nobody ? null : Readable.toWeb(res), { status: res.statusCode, headers: h }));
+    });
+    req.on('error', bad);
+    req.end();
+  });
+}
+
+module.exports = { isPrivateAddress, isInternalUrl, resolver, INTERNAL_NAME, guardedFetch };

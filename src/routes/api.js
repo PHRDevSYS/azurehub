@@ -314,12 +314,13 @@ function register(r) {
     return { queued };
   });
 
-  // Parar de sincronizar (sem anúncio: desfaz a seleção; com anúncio: pausa).
+  // Parar de sincronizar (sem anúncio: desfaz a seleção; com anúncio: pausa e
+  // mantém o vínculo; `unlink: true` esquece o anúncio).
   r.post('/api/integrations/stop', requireAdmin, async (ctx) => {
     const body = await readJson(ctx.req);
     const skus = list(body.skus);
     const targets = list(body.platforms).length ? list(body.platforms) : platforms.ids();
-    for (const id of targets) for (const sku of skus) store.unselect(id, sku);
+    for (const id of targets) for (const sku of skus) store.unselect(id, sku, { unlink: body.unlink === true });
     return { ok: true };
   });
 

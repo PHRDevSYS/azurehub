@@ -113,3 +113,21 @@ test('download de foto/vídeo não acessa a rede interna nem estoura a memória'
     global.fetch = realFetch;
   }
 });
+
+test('DNS rebinding: o IP validado é o mesmo da conexão', async () => {
+  const { guardedFetch, resolver } = require('../src/lib/netguard');
+  const real = resolver.lookup;
+  const realFetch2 = global.fetch;
+  try {
+    global.fetch = realFetch2; // sem simulação: usa a conexão real protegida
+    let n = 0;
+    // 1ª resposta pública (passaria na checagem), 2ª privada (a que o socket usaria).
+    resolver.lookup = async () => [{ address: n++ === 0 ? '93.184.216.34' : '127.0.0.1', family: 4 }];
+    // A conexão resolve o nome por conta própria e valida de novo.
+    await resolver.lookup('x'); // consome a resposta pública
+    await assert.rejects(guardedFetch('http://rebind.test/'), /interno bloqueado/);
+    await assert.rejects(guardedFetch('http://127.0.0.1:9/'), /interno bloqueado/);
+  } finally {
+    resolver.lookup = real;
+  }
+});

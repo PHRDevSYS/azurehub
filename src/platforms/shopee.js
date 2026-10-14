@@ -224,11 +224,24 @@ async function create(ctx, p) {
 // ============================================================ atualização
 async function update(ctx, p, listing) {
   const warnings = [];
-  const prev = listing.meta || {};
+  let prev = listing.meta || {};
   const itemId = String(listing.external_id);
   const prep = await prepare(ctx, p, prev, warnings);
   const meta = { ...prep.meta };
   const variants = p.variants || [];
+
+  // Com desconto ativo a Shopee recusa mudar o preço original: o desconto sai
+  // antes e é recriado no fim, se ainda valer.
+  const priceMoves = p.price !== prev.price || variants.some((v) => v.price !== (prev.model_prices || {})[v.sku]);
+  if (priceMoves && prev.promo && prev.promo.end > Math.floor(Date.now() / 1000)) {
+    try {
+      await removeDiscount(ctx, itemId, prev.promo, warnings);
+      meta.promo = null;
+      prev = { ...prev, promo: null };
+    } catch (e) {
+      warnings.push(`Desconto anterior não removido antes do novo preço: ${e.message}`);
+    }
+  }
 
   // 1) Conteúdo: update_item revalida o anúncio inteiro, então só quando mudou.
   if (prep.contentHash !== prev.content_hash || prep.logisticsHash !== prev.logistics_hash) {
@@ -889,6 +902,17 @@ async function setListed(ctx, itemId, listed) {
 }
 
 // ------------------------------------------------------------- desconto
+async function removeDiscount(ctx, itemId, promo, warnings) {
+  const targets = promo.model_ids && promo.model_ids.length ? promo.model_ids : [0];
+  for (const modelId of targets) {
+    const body = { discount_id: promo.discount_id, item_id: Number(itemId) };
+    if (modelId) body.model_id = modelId;
+    const res = await call(ctx, 'POST', '/api/v2/discount/delete_discount_item', { body });
+    const fails = batchFailures(res);
+    if (fails.length) warnings.push(`Desconto não removido: ${fails.join('; ')}`);
+  }
+}
+
 async function syncDiscount(ctx, itemId, p, prev, meta, warnings) {
   const now = Math.floor(Date.now() / 1000);
   const old = prev.promo && prev.promo.end > now ? prev.promo : null;
@@ -901,16 +925,7 @@ async function syncDiscount(ctx, itemId, p, prev, meta, warnings) {
   if (variants.length) item.model_list = modelList;
   else if (p.promoPrice) item.item_promotion_price = price(p.promoPrice);
 
-  const remove = async (promo) => {
-    const targets = promo.model_ids && promo.model_ids.length ? promo.model_ids : [0];
-    for (const modelId of targets) {
-      const body = { discount_id: promo.discount_id, item_id: Number(itemId) };
-      if (modelId) body.model_id = modelId;
-      const res = await call(ctx, 'POST', '/api/v2/discount/delete_discount_item', { body });
-      const fails = batchFailures(res);
-      if (fails.length) warnings.push(`Desconto não removido: ${fails.join('; ')}`);
-    }
-  };
+  const remove = (promo) => removeDiscount(ctx, itemId, promo, warnings);
 
   try {
     if (!has) {

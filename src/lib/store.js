@@ -437,10 +437,11 @@ function selectForPlatform(platform, sku) {
 }
 
 // Parar de sincronizar: sem anúncio criado, o vínculo some; com anúncio, fica pausado.
-function unselect(platform, sku) {
+function unselect(platform, sku, { unlink = false } = {}) {
   const cur = getListing(platform, sku);
   if (!cur) return;
-  if (!cur.external_id) run('DELETE FROM listings WHERE platform = ? AND sku = ?', platform, sku);
+  // unlink: esquece o anúncio (ele continua na plataforma); um novo envio cria outro.
+  if (!cur.external_id || unlink) run('DELETE FROM listings WHERE platform = ? AND sku = ?', platform, sku);
   else run(`UPDATE listings SET status = 'paused' WHERE platform = ? AND sku = ?`, platform, sku);
   run(`DELETE FROM jobs WHERE platform = ? AND sku = ? AND status = 'queued'`, platform, sku);
 }

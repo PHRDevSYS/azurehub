@@ -134,3 +134,13 @@ test('Parar de sincronizar: sem anúncio sai da integração; com anúncio fica 
   assert.equal(s.body.queued, 1);
   assert.equal(store.getListing('shopee', 'GAR').status, 'synced');
 });
+
+test('parar de sincronizar pausa o anúncio; unlink esquece o vínculo', () => {
+  store.selectForPlatform('shopee', 'UNL-1');
+  store.saveListing('shopee', 'UNL-1', { external_id: '123', status: 'synced' });
+  store.unselect('shopee', 'UNL-1');
+  assert.equal(store.getListing('shopee', 'UNL-1').status, 'paused');
+  assert.equal(store.getListing('shopee', 'UNL-1').external_id, '123');
+  store.unselect('shopee', 'UNL-1', { unlink: true });
+  assert.equal(store.getListing('shopee', 'UNL-1'), null);
+});

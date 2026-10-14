@@ -175,7 +175,7 @@ async function create(ctx, p) {
 // ------------------------------------------------------------ atualização
 async function update(ctx, p, listing) {
   const warnings = [];
-  const prev = listing.meta || {};
+  let prev = listing.meta || {};
   const productId = String(listing.external_id);
   const meta = {};
   const qty = stockQty(p);
@@ -210,6 +210,7 @@ async function update(ctx, p, listing) {
 
   // 3) Preço e estoque: publicação imediata, sem auditoria.
   if (p.price !== prev.price) {
+    prev = await dropPromoBeforePrice(ctx, productId, prev, meta, warnings);
     try {
       await call(ctx, 'POST', `/product/202309/products/${productId}/prices/update`, {
         body: { skus: [{ id: skuId, price: price(ctx, p.price) }] },
@@ -405,7 +406,7 @@ async function createVariants(ctx, p) {
 
 async function updateVariants(ctx, p, listing) {
   const warnings = [];
-  const prev = listing.meta || {};
+  let prev = listing.meta || {};
   const productId = String(listing.external_id);
   const meta = { variant_mode: true };
   if (p.variants.length > maxSkus(ctx)) throw new PlatformError(`TikTok aceita no máximo ${maxSkus(ctx)} variações (SKUs) por produto nesta região (recebido: ${p.variants.length})`);
@@ -485,6 +486,7 @@ async function updateVariants(ctx, p, listing) {
 
   // 3) Preço e estoque por SKU (publicação imediata, sem auditoria).
   const priceChanges = p.variants.filter((v) => skuIds[v.sku] && prices[v.sku] !== v.price);
+  if (priceChanges.length) prev = await dropPromoBeforePrice(ctx, productId, prev, meta, warnings);
   if (priceChanges.length) {
     try {
       await call(ctx, 'POST', `/product/202309/products/${productId}/prices/update`, {
@@ -750,6 +752,20 @@ async function productAttributes(ctx, categoryId, p) {
 // --------------------------------------------------------------- promoção
 // Campanha FIXED_PRICE por produto (1 SKU). A atividade é reaproveitada
 // enquanto as datas pedidas forem as mesmas e ela não tiver expirado.
+// A TikTok recusa mudar o preço com promoção ativa: tira o produto da
+// atividade antes (a promoção é recriada no fim, se ainda valer).
+async function dropPromoBeforePrice(ctx, productId, prev, meta, warnings) {
+  if (!prev.promo || !(prev.promo.end > Math.floor(Date.now() / 1000))) return prev;
+  try {
+    await call(ctx, 'DELETE', `/promotion/202309/activities/${prev.promo.activity_id}/products`, { body: { product_ids: [productId] } });
+    meta.promo = null;
+    return { ...prev, promo: null };
+  } catch (e) {
+    warnings.push(`Promoção anterior não removida antes do novo preço: ${e.message}`);
+    return prev;
+  }
+}
+
 async function syncPromotion(ctx, productId, p, prev, meta, warnings) {
   const now = Math.floor(Date.now() / 1000);
   const old = prev.promo && prev.promo.end > now ? prev.promo : null;

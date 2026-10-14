@@ -3,7 +3,7 @@
 // de origem (Shopee e TikTok exigem upload do arquivo; o Mercado Livre
 // baixa sozinho a partir da URL pública).
 const config = require('../config');
-const { isInternalUrl } = require('./netguard');
+const { isInternalUrl, guardedFetch } = require('./netguard');
 
 class PlatformError extends Error {
   constructor(message, { status, body, retryable = false } = {}) {
@@ -59,7 +59,7 @@ async function download(url, { kind = 'image', maxBytes = config.maxMediaBytes }
       throw new PlatformError(`${kind} ${u.host}: endereço da rede interna bloqueado (use MEDIA_ALLOW_PRIVATE=1 se as fotos ficam na rede local)`);
     }
     try {
-      res = await fetch(u.href, { signal, redirect: 'manual' });
+      res = await guardedFetch(u.href, { signal, allowPrivate: process.env.MEDIA_ALLOW_PRIVATE === '1' });
     } catch (e) {
       throw new PlatformError(`Não consegui baixar ${kind} ${url}: ${e.message}`, { retryable: true });
     }
