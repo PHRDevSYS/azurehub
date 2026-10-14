@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS logs (
   sku TEXT,
   message TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS logs_sku ON logs(sku, id);
+CREATE INDEX IF NOT EXISTS logs_platform ON logs(platform, id);
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   expires_at TEXT NOT NULL
@@ -507,10 +509,11 @@ function clearFinishedJobs() {
 }
 
 // ---------- logs ----------
+let logCount = 0;
 function log(level, message, { platform = null, sku = null } = {}) {
   run('INSERT INTO logs(ts, level, platform, sku, message) VALUES(?, ?, ?, ?, ?)',
     now(), level, platform, sku, String(message).slice(0, 4000));
-  run('DELETE FROM logs WHERE id <= (SELECT MAX(id) - 5000 FROM logs)');
+  if (++logCount % 100 === 0) run('DELETE FROM logs WHERE id <= (SELECT MAX(id) - 5000 FROM logs)'); // poda em lote
   const line = `[${level}]${platform ? ` [${platform}]` : ''}${sku ? ` [${sku}]` : ''} ${message}`;
   (level === 'error' ? console.error : console.log)(line);
 }

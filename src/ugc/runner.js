@@ -98,12 +98,12 @@ function mediaType(kind, buffer, claimed) {
   throw new Error(`o provedor devolveu um arquivo que não é vídeo (${claimed || 'tipo desconhecido'})`);
 }
 
-function save(item, buffer, claimed) {
+async function save(item, buffer, claimed) {
   const mime = mediaType(item.kind, buffer, claimed);
   const dir = path.join(DIR, item.sku.replace(/[^\w.-]+/g, '_'));
-  fs.mkdirSync(dir, { recursive: true });
+  await fs.promises.mkdir(dir, { recursive: true });
   const file = path.join(dir, `${item.id}.${EXT[mime] || (item.kind === 'video' ? 'mp4' : 'png')}`);
-  fs.writeFileSync(file, buffer);
+  await fs.promises.writeFile(file, buffer); // vídeo pode ter dezenas de MB: sem travar o servidor
   store.ugcUpdate(item.id, { status: 'done', file: path.relative(config.dataDir, file), mime, error: null });
 }
 
@@ -119,8 +119,8 @@ async function persona(item, accept = COMMON_MIMES) {
   }
   const done = store.ugcLatestOf(item.sku, 'uso', { status: 'done', gender: item.gender });
   const file = filePath(done);
-  if (!file || fs.statSync(file).size > PERSONA_MAX) return null;
-  const buffer = fs.readFileSync(file);
+  if (!file || (await fs.promises.stat(file)).size > PERSONA_MAX) return null;
+  const buffer = await fs.promises.readFile(file);
   const mime = sniffImage(buffer) || done.mime || 'image/png';
   return accept.includes(mime) ? { url: `ugc:${done.id}`, buffer, mime, name: path.basename(file) } : null;
 }
@@ -147,7 +147,7 @@ async function work(id) {
     store.ugcUpdate(id, { status: 'running' });
     const { refs, prompt, persona: hasPersona } = await inputs();
     const out = await retrying(() => provider.image(cfg, { prompt, refs, persona: hasPersona, aspect: '4:5' }));
-    save(item, out.buffer, out.mime);
+    await save(item, out.buffer, out.mime);
     return;
   }
   let job = item.job;
@@ -155,7 +155,7 @@ async function work(id) {
     store.ugcUpdate(id, { status: 'running' });
     const { refs, prompt, persona: hasPersona } = await inputs();
     const out = await retrying(() => provider.startVideo(cfg, { prompt, refs, persona: hasPersona, seconds: ai.videoSeconds(), aspect: '9:16' }));
-    if (out.buffer) { save(item, out.buffer, out.mime || 'video/mp4'); return; } // provedor que responde na hora
+    if (out.buffer) { await save(item, out.buffer, out.mime || 'video/mp4'); return; } // provedor que responde na hora
     job = out.job;
     store.ugcUpdate(id, { job: String(job) });
   }
@@ -171,7 +171,7 @@ async function work(id) {
       if (!(e && e.retryable) || ++pollErrors > 20) throw e;
       st = { status: 'running' };
     }
-    if (st.status === 'done') { save(item, st.buffer, st.mime || 'video/mp4'); return; }
+    if (st.status === 'done') { await save(item, st.buffer, st.mime || 'video/mp4'); return; }
     if (st.status === 'error') throw new Error(st.error || 'o provedor não conseguiu gerar o vídeo');
     if (Date.now() - started > timing.maxWaitMs) throw new Error('o vídeo não ficou pronto a tempo; gere de novo');
     await timing.sleep(timing.pollMs);

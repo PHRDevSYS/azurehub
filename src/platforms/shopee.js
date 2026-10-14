@@ -24,6 +24,7 @@
 // - Vídeo: MP4 até 30 MB, 10–60 s, ≤ 1280×1280, enviado em partes de 4 MB.
 // - Desconto: início ≥ 1 h no futuro, fim ≥ 1 h após o início, duração < 180 dias.
 //   Com promoção ativa, o preço original não pode ser alterado.
+const { setBounded } = require('../lib/bounded');
 const { stableUrl } = require('../source/normalize');
 const { requestJson, download, PlatformError } = require('../lib/media');
 const { hmacHex, md5, sha256 } = require('../lib/crypto');
@@ -104,7 +105,7 @@ async function cached(key, ttlMs, fn) {
   const hit = cache.get(key);
   if (hit && hit.at > Date.now() - ttlMs) return hit.value;
   const value = await fn();
-  cache.set(key, { at: Date.now(), value });
+  setBounded(cache, key, { at: Date.now(), value }, 300);
   return value;
 }
 const H = 3600e3;

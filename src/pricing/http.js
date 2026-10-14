@@ -7,6 +7,7 @@
 // terceiros): só http(s); nunca endereços internos (loopback, rede privada,
 // link-local/metadados da nuvem), conferido em cada redirecionamento; corpo
 // limitado a MAX_BYTES; cache com teto de entradas.
+const { setBounded } = require('../lib/bounded');
 const net = require('node:net');
 const config = require('../config');
 
@@ -16,6 +17,8 @@ const USER_AGENT = `${UA_TOKEN}/${config.VERSION} (+${config.publicUrl}; pesquis
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const CACHE_MAX = 1000;
+const CACHE_BYTES = 48 * 1048576;
+const sizeOf = (v) => (typeof v === 'string' ? v.length : v && typeof v.text === 'string' ? v.text.length : 2048);
 
 class PriceSourceError extends Error {}
 
@@ -90,8 +93,15 @@ async function rawGet(url, { headers = {}, timeoutMs = 20000 } = {}) {
 
 function cacheSet(key, value) {
   cache.delete(key);
-  cache.set(key, { at: timing.now(), value });
-  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+  cache.set(key, { at: timing.now(), value, size: sizeOf(value) });
+  // Teto por entradas E por bytes (o valor pode ser uma página HTML inteira).
+  let bytes = 0;
+  for (const e of cache.values()) bytes += e.size;
+  for (const k of cache.keys()) {
+    if (cache.size <= CACHE_MAX && bytes <= CACHE_BYTES) break;
+    bytes -= cache.get(k).size;
+    cache.delete(k);
+  }
 }
 
 // --------------------------------------------------------------- robots.txt
@@ -158,7 +168,7 @@ async function robotsAllows(url) {
     const res = await rawGet(`${u.origin}/robots.txt`, { timeoutMs: 10000 }).catch((e) => ({ status: 0, error: e.message }));
     // 4xx = sem restrições; 5xx/rede = trata como bloqueado (prática do Google).
     entry = { at: timing.now(), groups: res.status >= 200 && res.status < 300 ? parseRobots(res.text) : [], blocked: !res.status || res.status >= 500 };
-    robotsCache.set(key, entry);
+    setBounded(robotsCache, key, entry, 500);
   }
   if (entry.blocked) return false;
   return isAllowed(entry.groups, u.pathname + u.search);
@@ -173,7 +183,7 @@ async function politeGet(url, { respectRobots = true, minIntervalMs = 1500, cach
   const host = new URL(url).host;
   const wait = (lastByHost.get(host) || 0) + minIntervalMs - timing.now();
   if (wait > 0) await timing.sleep(wait);
-  lastByHost.set(host, timing.now());
+  setBounded(lastByHost, host, timing.now(), 2000);
   const res = await rawGet(url, { headers });
   if (res.status === 429) throw new PriceSourceError(`${host} limitou as requisições (429); tente mais tarde`);
   if (!res.ok) throw new PriceSourceError(`${host} respondeu HTTP ${res.status}`);

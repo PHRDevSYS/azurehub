@@ -217,3 +217,18 @@ test('origem: campos obrigatórios respeitam showIf e senha mascarada mantém a 
   assert.throws(() => src.cleanSource({ type: 'woocommerce', url: 'https://x' }), /Chave do consumidor/);
   assert.throws(() => src.cleanSource({ type: 'inexistente' }), /Origem desconhecida/);
 });
+
+test('Shopify: estoque não rastreado vira saldo alto (venda sem limite), não zero', async () => {
+  mock(() => ({
+    data: { products: { pageInfo: { hasNextPage: false }, nodes: [{
+      id: 'gid://shopify/Product/9', title: 'Assinatura', descriptionHtml: '', vendor: 'X', status: 'ACTIVE',
+      media: { nodes: [{ mediaContentType: 'IMAGE', image: { url: 'https://cdn.test/a.jpg' } }] },
+      variants: { pageInfo: { hasNextPage: false }, nodes: [{
+        sku: 'ASS-1', price: '10.00', compareAtPrice: null, inventoryQuantity: 0, selectedOptions: [{ name: 'Title', value: 'Default Title' }],
+        barcodes: { nodes: [] }, media: { nodes: [] }, inventoryItem: { tracked: false, measurement: { weight: null } },
+      }] },
+    }] } },
+  }));
+  const [p] = (await shopify.fetchProducts({ shop: 'https://minhaloja.myshopify.com/admin', access_token: 'shpat_x' })).map(normalizeProduct);
+  assert.equal(p.stock, 999);
+});

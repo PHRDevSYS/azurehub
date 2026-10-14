@@ -345,3 +345,28 @@ test('USER PRODUCTS: promoção removida de uma variação sai só do anúncio d
   assert.deepEqual(promoCalls(calls).map((c) => [c.method, c.path]), [['DELETE', '/seller-promotions/items/MLB101']]);
   assert.equal(res.meta.promos['CAM-PR-M'], null);
 });
+
+// ===================================================================== simples
+const garrafa = (over = {}) => normalizeProduct({
+  sku: 'SIM', title: 'Garrafa Térmica 1L', description: 'Inox', price: 89.9, brand: 'Marca', stock: 3,
+  images: ['https://site.test/g.jpg'], categories: { mercadolivre: 'MLB31447' }, attributes: { GENDER: 'Masculino', COLOR: 'Preto' }, ...over,
+});
+
+test('SIMPLES: sem estoque na criação adia o anúncio (o ML recusa estoque 0)', async () => {
+  const calls = mock({ 'POST /items': () => ({ id: 'MLBX' }) });
+  const res = await ml.publish(ctx(), garrafa({ stock: 0 }), null);
+  assert.equal(res.externalId, null);
+  assert.match(res.warnings.join(), /Sem estoque/);
+  assert.equal(calls.some((c) => c.method === 'POST' && c.path === '/items'), false, 'nada é criado');
+});
+
+test('SIMPLES: falha na descrição depois de criar guarda o id (a nova tentativa não duplica)', async () => {
+  mock({
+    'POST /items': () => ({ id: 'MLB77', permalink: 'https://ml/MLB77' }),
+    'POST /items/MLB77/description': () => ({ __status: 500, message: 'erro' }),
+  });
+  await assert.rejects(ml.publish(ctx(), garrafa(), null), (e) => {
+    assert.equal(e.partial.externalId, 'MLB77');
+    return true;
+  });
+});

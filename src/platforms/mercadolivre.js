@@ -2,6 +2,7 @@
 // Mercado Livre — https://developers.mercadolivre.com.br/pt_br/api-docs-pt-br
 // OAuth 2.0 (authorization code). Access token dura 6 h; refresh token é de
 // uso único (cada refresh devolve um novo — por isso sempre regravamos).
+const { setBounded } = require('../lib/bounded');
 const { requestJson, PlatformError, youtubeId } = require('../lib/media');
 const { sha256 } = require('../lib/crypto');
 const H_ = require('./preview-helpers');
@@ -257,7 +258,7 @@ async function isUpSeller(ctx) {
   if (hit && hit.at > Date.now() - 3600e3) return hit.up;
   const me = await api(ctx, 'GET', '/users/me');
   const up = (me.tags || []).includes('user_product_seller');
-  sellerTags.set(key, { at: Date.now(), up });
+  setBounded(sellerTags, key, { at: Date.now(), up }, 100);
   return up;
 }
 
@@ -267,7 +268,7 @@ async function categoryInfo(ctx, categoryId) {
   if (hit && hit.at > Date.now() - 6 * 3600e3) return hit.info;
   const [cat, attrs] = await Promise.all([api(ctx, 'GET', `/categories/${categoryId}`), api(ctx, 'GET', `/categories/${categoryId}/attributes`)]);
   const info = { name: cat.name, types: cat.attribute_types, settings: cat.settings || {}, attrs: Array.isArray(attrs) ? attrs : [] };
-  categoryCache.set(categoryId, { at: Date.now(), info });
+  setBounded(categoryCache, categoryId, { at: Date.now(), info }, 300);
   return info;
 }
 
@@ -360,7 +361,7 @@ async function publishVariants(ctx, p, listing) {
   } catch (e) {
     // Conta migrada para User Products sem a tag em cache: refaz no modelo novo.
     if (!up && !(listing && listing.external_id) && /family_name|variations is invalid|fields \[title\]|user.product/i.test(e.message)) {
-      sellerTags.set(String(ctx.tokens.user_id || ctx.creds.client_id), { at: Date.now(), up: true });
+      setBounded(sellerTags, String(ctx.tokens.user_id || ctx.creds.client_id), { at: Date.now(), up: true }, 100);
       const upAxes = variationAxes(p, info, true);
       return upFamily(ctx, p, listing, { ...base, axes: upAxes, shared: itemAttributes(p, upAxes, info, [], true), warnings: [...warnings, 'A conta usa o modelo User Products do ML: cada variação vira um anúncio da mesma família'] });
     }

@@ -144,3 +144,18 @@ test('parar de sincronizar pausa o anúncio; unlink esquece o vínculo', () => {
   store.unselect('shopee', 'UNL-1', { unlink: true });
   assert.equal(store.getListing('shopee', 'UNL-1'), null);
 });
+
+test('captura em transação: uma falha desfaz o lote; jobs concluídos antigos são podados', () => {
+  const before = store.listProducts({ limit: 1 }).total;
+  assert.throws(() => store.transaction(() => {
+    store.upsertProduct({ sku: 'TX-1', title: 'a', price: 1, stock: 1, images: ['x'], videos: [], variants: [] }, 'h1', 'api');
+    throw new Error('falha no meio');
+  }), /falha no meio/);
+  assert.equal(store.getProduct('TX-1'), null);
+  assert.equal(store.listProducts({ limit: 1 }).total, before);
+
+  const old = new Date(Date.now() - 30 * 86400e3).toISOString();
+  store.open().prepare(`INSERT INTO jobs(platform, sku, status, attempts, run_after, created_at, updated_at) VALUES('shopee','OLD','done',1,?,?,?)`).run(old, old, old);
+  store.pruneJobs(14);
+  assert.equal(store.open().prepare(`SELECT COUNT(*) AS n FROM jobs WHERE sku = 'OLD'`).get().n, 0);
+});

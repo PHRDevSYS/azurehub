@@ -21,6 +21,7 @@
 //   Foto por valor de UM só tipo (aqui, o 1º: ex. uma foto por cor), enviada
 //   com use_case ATTRIBUTE_IMAGE. Em Edit/Partial Edit, SKU omitida é APAGADA
 //   e SKU sem id é criada; preço e estoque omitidos ficam como estão.
+const { setBounded } = require('../lib/bounded');
 const { stableUrl } = require('../source/normalize');
 const { requestJson, download, PlatformError } = require('../lib/media');
 const { hmacHex, sha256 } = require('../lib/crypto');
@@ -701,7 +702,7 @@ async function categoryAttributes(ctx, categoryId) {
   if (locale(ctx)) query.locale = locale(ctx);
   const res = await call(ctx, 'GET', `/product/202309/categories/${categoryId}/attributes`, { query });
   const all = res.attributes || [];
-  attrCache.set(key, { at: Date.now(), list: all.filter((a) => a.type === 'PRODUCT_PROPERTY'), sales: all.filter((a) => a.type === 'SALES_PROPERTY') });
+  setBounded(attrCache, key, { at: Date.now(), list: all.filter((a) => a.type === 'PRODUCT_PROPERTY'), sales: all.filter((a) => a.type === 'SALES_PROPERTY') }, 300);
   return attrCache.get(key).list;
 }
 

@@ -127,15 +127,24 @@ function dedupe(offers) {
   return offers;
 }
 
-// Inicia (ou devolve a que já está rodando).
+// Inicia a pesquisa. Se já há uma rodando, os SKUs novos entram no fim da fila
+// dela (em vez de serem descartados).
+let queue = [];
 function start(skus) {
-  if (task && task.running) return { ...status(), started: false };
+  if (task && task.running) {
+    const fresh = skus.filter((s) => !queue.includes(s) && s !== task.current);
+    queue.push(...fresh);
+    task.total += fresh.length;
+    return { ...status(), started: false, added: fresh.length };
+  }
   const cfg = require('./index').getSettings();
   if (!cfg.sources.some((s) => s.enabled !== false)) throw new Error('Cadastre ao menos uma fonte de pesquisa em Precificação › Fontes');
+  queue = [...skus];
   task = { running: true, total: skus.length, done: 0, current: null, errors: 0, startedAt: store.now(), finishedAt: null };
   (async () => {
     const ctx = makeCtx();
-    for (const sku of skus) {
+    while (queue.length) {
+      const sku = queue.shift();
       task.current = sku;
       try {
         const r = await researchOne(sku, cfg, ctx);

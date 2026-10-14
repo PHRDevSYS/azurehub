@@ -414,6 +414,17 @@ test('VARIAÇÕES: variação que zera — estoque 0 aceito mantém a SKU; recus
   assert.ok(!calls.some((c) => /partial_edit|inventory|prices/.test(c.path)), JSON.stringify(calls.map((c) => c.path)));
 });
 
+test('VARIAÇÕES: erro temporário no estoque 0 não vira recusa (a SKU não sai do anúncio)', async () => {
+  const listing = await createdListing();
+  const p = camiseta();
+  p.variants[1].stock = 0;
+  const calls = mock(variantRoutes({
+    'POST /product/202309/products/TTV/inventory/update': () => ({ code: 36009004, message: 'request limit reached' }),
+  }));
+  await assert.rejects(tiktok.publish(ctx(), p, listing), (e) => e.retryable === true);
+  assert.ok(!calls.some((c) => /partial_edit/.test(c.path)), 'não mexe na estrutura por causa de um 503');
+});
+
 test('VARIAÇÕES: todas sem estoque desativa; produto que perde as variações é recusado', async () => {
   const listing = await createdListing();
   const p = camiseta();

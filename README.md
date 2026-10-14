@@ -4,7 +4,7 @@ Hub de integrações que leva os produtos do seu **ERP, loja ou site** para o
 **Mercado Livre**, a **Shopee** e o **TikTok Shop**: título, descrição, preço,
 preço promocional, estoque, peso/dimensões, marca/GTIN, variações, fotos e vídeos.
 
-> **Versão beta (0.7.0-beta.1).** Fluxo completo implementado e coberto por
+> **Versão beta (0.7.0-beta.2).** Fluxo completo implementado e coberto por
 > testes com as APIs simuladas no formato da documentação oficial de cada
 > plataforma; ainda **não validado contra os sandboxes reais** — ver
 > [Antes de ir para produção](#antes-de-ir-para-produção).
@@ -348,7 +348,32 @@ usa o IP real do cliente; sem esse cabeçalho, todos aparecem como 127.0.0.1).
 | `MAX_MEDIA_MB` | `100` | Tamanho máximo de foto/vídeo baixado |
 | `SESSION_HOURS` | `12` | Duração da sessão do painel |
 | `PRICE_SCRAPER_CMD` | `python3` | Python usado pela fonte Scrapling da Precificação (ex.: `/opt/azurehub-scraper/bin/python`) |
+| `SYNC_CONCURRENCY` | `2` | Envios simultâneos por marketplace (1 a 8; nunca dois do mesmo produto) |
 | `PRICE_ALLOW_PRIVATE` | vazio | `1` libera a pesquisa de preços em endereços da rede interna (só para testes) |
+
+## Comportamento do motor de sincronização
+
+- Cada marketplace tem uma fila; até `SYNC_CONCURRENCY` produtos são enviados
+  ao mesmo tempo. Erros temporários (rede, limite de uso, 5xx) voltam à fila
+  com espera crescente (15 s até 30 min, 5 tentativas).
+- **Falha depois de criar o anúncio** (ex.: a descrição no Mercado Livre): o
+  id é guardado e a nova tentativa continua dele, sem duplicar.
+- **Preço recusado** porque há promoção ativa na plataforma: o hub tira a
+  promoção/desconto antes de mudar o preço e a recria depois. Se mesmo assim
+  a plataforma recusar, o produto não fica "sincronizado": volta à fila a
+  cada 30 min (até 6 vezes).
+- **Fim da promoção:** o hub agenda um novo envio para o fim da campanha, que
+  encerra ou renova a promoção.
+- **Parar de sincronizar** durante um envio em andamento mantém o anúncio
+  vinculado e pausado. Reativar o destino reenfileira o que mudou enquanto
+  ele estava desligado. A API `POST /api/integrations/stop` aceita
+  `"unlink": true` para esquecer o anúncio (ele continua na plataforma e um
+  novo envio cria outro).
+- **Captura:** produtos que somem da origem viram inativos (estoque 0) e os
+  anúncios são pausados; captura vazia nunca desativa nada. Cada lote da
+  captura roda numa transação (20 mil produtos em poucos segundos). Jobs
+  concluídos há mais de 14 dias são apagados automaticamente.
+- Shopify: estoque não rastreado vai como 999 (venda sem limite).
 
 ## Destinos (marketplaces)
 
@@ -607,6 +632,9 @@ FROM variacoes v JOIN produtos p ON p.id = v.produto_id
 - Mídia UGC só é gravada e servida como imagem/vídeo conferidos pelo conteúdo.
 - Bloqueio de login por (IP, e-mail): 5 erros bloqueiam 10 minutos só aquela
   combinação.
+- **DNS rebinding:** a pesquisa de preços e o download de mídia resolvem o
+  nome uma vez, validam o IP e conectam exatamente nele (o endereço não pode
+  mudar entre a checagem e o uso).
 
 ## Estrutura
 
@@ -681,6 +709,9 @@ Itens que o beta **ainda não cobre** ou que precisam ser conferidos nos sandbox
       (data URL) como referência de vídeo.
 - [ ] **CRM (atendimento)**: o agente aparece na tela com a escolha de modelo,
       mas responder compradores ainda não está implementado.
+- [ ] **Desempenho em catálogos enormes (50 mil+)**: a captura bloqueia o servidor por alguns segundos por lote; o hash de senha (`scrypt`) é síncrono; a pesquisa de preços roda um produto por vez (respeitando o intervalo por site). Medido: 20 mil produtos capturados em ~3 s, busca em ~30 ms.
+- [ ] **Modelo reserva por agente** (usar outro modelo quando o principal falhar) ainda não existe.
+- [ ] Teste de navegador opcional: `tools/e2e-panel.js` (precisa do Playwright).
 - [ ] **Vídeo no Mercado Livre** por arquivo (clips); hoje só YouTube.
 - [ ] **Webhooks/notificações** das plataformas (pedidos, perguntas, mudança
       de status do anúncio) — o beta é só de envio (site → marketplaces).
